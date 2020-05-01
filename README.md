@@ -2,7 +2,7 @@
 
 #
 # dramatic_squirrel.sh
-# recreates the zoom effect from the Dramatic Squirrel meme
-#
+recreates the zoom effect from the Dramatic Squirrel meme
+
 
 
