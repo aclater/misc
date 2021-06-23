@@ -6,6 +6,9 @@
 #
 # By The #TonyJames
 #
+# set USER to your local username
+#
+
 
 VPN_UUID="71f1c668-a681-47b7-b683-f0dc0a319cb9"
 USER="tony"
