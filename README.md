@@ -8,4 +8,7 @@ These won't work with your webcam if it doesnt support "zoom_absolute"
 
 ## extreme_closeup.sh
   recreates the Waynes World "Extreme Closeup" effect
+  
+## 00-kinit.sh
+  Drop into /etc/NetworkManager/dispatcher.d/ to launch krb5-auth-dialog on VPN connect
 
