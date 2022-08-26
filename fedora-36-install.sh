@@ -56,14 +56,14 @@ function install_dev_requirements() {
     
     echo -e "${RED}Installing Fedora Development Tools package group${NC}"
     sudo dnf -yq groupinstall "Development Tools"
-    sudo dnf -yq install HandBrake libavcodec-free libavcodec-free-devel
+    sudo dnf -yq install HandBrake
     sudo dnf -yq install abcde flac flac-libs flac-devel ImageMagick ImageMagick-libs ImageMagick-devel \
     cdparanoia cdparanoia-devel cdparanoia-libs cdparanoia-static
     
     # The last maintained package of glyr was from Fedora 33, Grabbing from archives
     sudo dnf -yq install https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-libs-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-devel-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm
     sudo dnf -yq install at
-    sudo dnf -yq install python3 python3-pip
+    sudo dnf -yq install python3 python3-pip python-netifaces python3-devel
     sudo dnf -yq install openssl openssl-devel libcurl libcurl-devel curl
     
     # Add UnitedRPMS for dvdcss
@@ -128,8 +128,8 @@ function install_arm_live_env() {
     cd /opt
     clone_arm
     cd arm
-    sudo pip3 install wheel
-    sudo pip3 install -r requirements.txt
+    sudo pip3 -q install wheel
+    sudo pip3 -q install -r requirements.txt
     sudo cp /opt/arm/setup/51-automedia.rules /etc/udev/rules.d/
     create_abcde_symlink
     sudo cp docs/arm.yaml.sample arm.yaml
@@ -148,8 +148,8 @@ function install_arm_dev_env() {
     cd /opt
     clone_arm
     cd arm
-    sudo pip3 install wheel
-    sudo pip3 install -r requirements.txt
+    sudo pip3 -q install wheel
+    sudo pip3 -q install -r requirements.txt
     create_abcde_symlink
     sudo cp docs/arm.yaml.sample arm.yaml
     sudo chown arm:arm arm.yaml
