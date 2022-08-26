@@ -54,9 +54,9 @@ function install_dev_requirements() {
     sudo dnf -y install HandBrake libavcodec-free libavcodec-free-devel
     sudo dnf -y install abcde flac flac-libs flac-devel ImageMagick ImageMagick-libs ImageMagick-devel \
     cdparanoia cdparanoia-devel cdparanoia-libs cdparanoia-static
-     sudo dnf -y install https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm
-    sudo dnf -y install https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-devel-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm
-    sudo dnf -y install https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-libs-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm
+    sudo dnf -y install https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-libs-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm \ 
+    https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm \
+    https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-devel-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm
     sudo dnf -y install at
     sudo dnf -y install python3 python3-pip -y
     sudo dnf -y install openssl openssl-devel libcurl libcurl-devel curl
