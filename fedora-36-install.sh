@@ -20,7 +20,7 @@ done
 function install_os_tools() {
     echo -e "${RED}Installing Fedora updates and OS packages${NC}"
     sudo dnf -yq upgrade
-    sudo dnf -yq install alsa-lib pipewire-alsa
+    sudo dnf -yq install alsa-lib pipewire-alsa rsyslog
     sudo dnf -yq install lsscsi net-tools
     sudo dnf -yq  install avahi && sudo systemctl restart avahi-daemon
     sudo dnf -yq install git
