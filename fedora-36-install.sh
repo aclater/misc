@@ -97,7 +97,7 @@ function clone_arm() {
     sudo mkdir -p arm
     sudo chown arm:arm arm
     sudo chmod 775 arm
-    git clone https://github.com/automatic-ripping-machine/automatic-ripping-machine.git arm
+    sudo git clone https://github.com/automatic-ripping-machine/automatic-ripping-machine.git arm
     sudo chown -R arm:arm arm
 }
 
