@@ -51,8 +51,7 @@ function install_dev_requirements() {
     https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
     sudo dnf -y groupinstall "Development Tools"
     sudo dnf -y update
-    sudo dnf -y install makemkv-bin makemkv-oss -y
-    sudo dnf -y install HandBrake libavcidec-free libavcodec-free-devel
+    sudo dnf -y install HandBrake libavcodec-free libavcodec-free-devel
     sudo dnf -y install abcde flac flac-libs flac-devel imagemagick ImageMagick-libs ImageMagick-devel glyr glyr-libs \
     cdparanoia cdparanoia-devel cdparanoia-libs cdparanoia-static
     sudo dnf -y install at
