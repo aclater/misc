@@ -60,6 +60,10 @@ function install_dev_requirements() {
     sudo dnf -y install at
     sudo dnf -y install python3 python3-pip -y
     sudo dnf -y install openssl openssl-devel libcurl libcurl-devel curl
+    
+    # Add UnitedRPMS for dvdcss
+    sudo rpm --import https://raw.githubusercontent.com/UnitedRPMs/unitedrpms/master/URPMS-GPG-PUBLICKEY-Fedora
+    sudo dnf -y install https://github.com/UnitedRPMs/unitedrpms/releases/download/20/unitedrpms-$(rpm -E %fedora)-20.fc$(rpm -E %fedora).noarch.rpm
     sudo dnf -y install libdvdcss libdvdread libdvdnav libdvdcss-devel libdvdread-devel libdvdnav-devel
     sudo dnf -y install lsdvd -y
     sudo dnf -y install java-openjdk-headless
