@@ -18,11 +18,12 @@ do
 done
 
 function install_os_tools() {
-    sudo dnf -y upgrade
-    sudo dnf -y install alsa-lib pipewire-alsa
-    sudo dnf -y install lsscsi net-tools
-    sudo dnf -y  install avahi && sudo systemctl restart avahi-daemon
-    sudo dnf -y install git
+    echo -e "${RED}Installing Fedora updates and OS packages${NC}"
+    sudo dnf -yq upgrade
+    sudo dnf -yq install alsa-lib pipewire-alsa
+    sudo dnf -yq install lsscsi net-tools
+    sudo dnf -yq  install avahi && sudo systemctl restart avahi-daemon
+    sudo dnf -yq install git
 
 }
 
@@ -47,29 +48,30 @@ function add_arm_user() {
 
 function install_dev_requirements() {
     echo -e "${RED}Installing ARM requirments${NC}"
-    sudo dnf -y install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
+    echo -e "${RED}Installing RPMFusion free and nonfree${NC}"
+    sudo dnf -yq install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
     https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
-    sudo dnf -y groupinstall "Development Tools"
-    sudo dnf -y update
-    sudo dnf -y install HandBrake libavcodec-free libavcodec-free-devel
-    sudo dnf -y install abcde flac flac-libs flac-devel ImageMagick ImageMagick-libs ImageMagick-devel \
+    echo -e "${RED}Installing Fedora Development Tools package group${NC}"
+    sudo dnf -yq groupinstall "Development Tools"
+        sudo dnf -yq install HandBrake libavcodec-free libavcodec-free-devel
+    sudo dnf -yq install abcde flac flac-libs flac-devel ImageMagick ImageMagick-libs ImageMagick-devel \
     cdparanoia cdparanoia-devel cdparanoia-libs cdparanoia-static
-    sudo dnf -y install https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-libs-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-devel-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm
-    sudo dnf -y install at
-    sudo dnf -y install python3 python3-pip -y
-    sudo dnf -y install openssl openssl-devel libcurl libcurl-devel curl
+    sudo dnf -yq install https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-libs-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-devel-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm
+    sudo dnf -yq install at
+    sudo dnf -yq install python3 python3-pip -y
+    sudo dnf -yq install openssl openssl-devel libcurl libcurl-devel curl
     
     # Add UnitedRPMS for dvdcss
     sudo rpm --import https://raw.githubusercontent.com/UnitedRPMs/unitedrpms/master/URPMS-GPG-PUBLICKEY-Fedora
-    sudo dnf -y install https://github.com/UnitedRPMs/unitedrpms/releases/download/20/unitedrpms-$(rpm -E %fedora)-20.fc$(rpm -E %fedora).noarch.rpm
-    sudo dnf -y install libdvdcss libdvdread libdvdnav libdvdcss-devel libdvdread-devel libdvdnav-devel
-    sudo dnf -y install lsdvd -y
-    sudo dnf -y install java-openjdk-headless
+    sudo dnf -yq install https://github.com/UnitedRPMs/unitedrpms/releases/download/20/unitedrpms-$(rpm -E %fedora)-20.fc$(rpm -E %fedora).noarch.rpm
+    sudo dnf -yq install libdvdcss libdvdread libdvdnav libdvdcss-devel libdvdread-devel libdvdnav-devel
+    sudo dnf -yq install lsdvd -y
+    sudo dnf -yq install java-openjdk-headless
 
-    sudo dnf -y install zlib zlib-devel expat expat-devel ffmpeg ffmpeg-devel qt5-qtbase-devel ffmpeg-libs
+    sudo dnf -yq install zlib zlib-devel expat expat-devel ffmpeg ffmpeg-devel qt5-qtbase-devel ffmpeg-libs
     
     # Installing snap in order to get makemkv
-    sudo dnf -y install snapd
+    sudo dnf -yq install snapd
     sudo ln -s /var/lib/snapd/snap /snap
     sudo snap install makemkv
     sudo ln -s /snap/bin/makemkv /usr/bin/makemkv
@@ -97,20 +99,20 @@ function clone_arm() {
     sudo mkdir -p arm
     sudo chown arm:arm arm
     sudo chmod 775 arm
-    sudo git clone https://github.com/automatic-ripping-machine/automatic-ripping-machine.git arm
+    sudo git clone --quiet https://github.com/automatic-ripping-machine/automatic-ripping-machine.git arm
     sudo chown -R arm:arm arm
 }
 
 function create_abcde_symlink() {
-    if ! [[ -z $(find /home/arm/ -type l -ls | grep ".abcde.conf") ]]; then
-        rm /home/arm/.abcde.conf
+    if ! [[ -z $(sudo find /home/arm/ -type l -ls | grep ".abcde.conf") ]]; then
+        sudo rm /home/arm/.abcde.conf
     fi
     sudo ln -sf /opt/arm/setup/.abcde.conf /home/arm/
 }
 
 function create_arm_config_symlink() {
     if ! [[ -z $(find /etc/arm/ -type l -ls | grep "arm.yaml") ]]; then
-        rm /etc/arm/arm.yaml
+        sudo rm /etc/arm/arm.yaml
     fi
     sudo ln -sf /opt/arm/arm.yaml /etc/arm/
 }
@@ -120,6 +122,7 @@ function install_arm_live_env() {
     cd /opt
     clone_arm
     cd arm
+    sudo pip3 install wheel
     sudo pip3 install -r requirements.txt
     sudo cp /opt/arm/setup/51-automedia.rules /etc/udev/rules.d/
     create_abcde_symlink
@@ -134,11 +137,12 @@ function install_arm_live_env() {
 function install_arm_dev_env() {
     # install arm without automation and with PyCharm
     echo -e "${RED}Installing ARM for Development${NC}"
-    cd /home/arm
+    #cd /home/arm
     sudo snap install pycharm-community --classic
     cd /opt
     clone_arm
     cd arm
+    sudo pip3 install wheel
     sudo pip3 install -r requirements.txt
     create_abcde_symlink
     sudo cp docs/arm.yaml.sample arm.yaml
@@ -191,7 +195,7 @@ function install_armui_service() {
 
 function launch_setup() {
     echo -e "${RED}Launching ArmUI first-time setup${NC}"
-    site_addr=`sudo netstat -tlpn | awk '{ print $4 }' | grep :8080`
+    site_addr=`sudo netstat -tlpn | awk '{ print $4 }' | grep 8080`
     if [ -z $site_addr ]; then
         echo -e "${RED}ERROR: ArmUI site is not running. Run \"sudo systemctl status armui\" to find out why${NC}"
     else
