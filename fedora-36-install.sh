@@ -191,7 +191,7 @@ function install_armui_service() {
 
 function launch_setup() {
     echo -e "${RED}Launching ArmUI first-time setup${NC}"
-    site_addr=`sudo netstat -tlpn | awk '{ print $4 }' | grep .*:8080`
+    site_addr=`sudo netstat -tlpn | awk '{ print $4 }' | grep :8080`
     if [ -z $site_addr ]; then
         echo -e "${RED}ERROR: ArmUI site is not running. Run \"sudo systemctl status armui\" to find out why${NC}"
     else
