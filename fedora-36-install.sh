@@ -70,7 +70,8 @@ function install_dev_requirements() {
     https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-devel-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm
             
     # Add UnitedRPMS for dvdcss
-    
+    echo -e "${RED}Installing UnitedRPMS for libdvdcss${NC}"
+
     sudo rpm --import https://raw.githubusercontent.com/UnitedRPMs/unitedrpms/master/URPMS-GPG-PUBLICKEY-Fedora
     sudo dnf -yq install https://github.com/UnitedRPMs/unitedrpms/releases/download/20/unitedrpms-$(rpm -E %fedora)-20.fc$(rpm -E %fedora).noarch.rpm
     sudo dnf -yq install libdvdcss libdvdcss-devel
@@ -101,6 +102,8 @@ function clone_arm() {
         echo -e "${RED}Existing ARM installation found, removing...${NC}"
         sudo rm -rf arm
     fi
+        echo -e "${RED}Installing ARM from git${NC}"
+
     sudo mkdir -p arm
     sudo chown arm:arm arm
     sudo chmod 775 arm
@@ -127,8 +130,11 @@ function install_arm_live_env() {
     cd /opt
     clone_arm
     cd arm
+    echo -e "${RED}Installing ARM python dependencies via pip3${NC}"
     sudo pip3 -q install wheel
     sudo pip3 -q install -r requirements.txt
+    
+    echo -e "${RED}Setting up udev rules for ARM${NC}"
     sudo cp /opt/arm/setup/51-automedia.rules /etc/udev/rules.d/
     create_abcde_symlink
     sudo cp docs/arm.yaml.sample arm.yaml
