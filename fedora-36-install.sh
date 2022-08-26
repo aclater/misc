@@ -56,28 +56,26 @@ function install_dev_requirements() {
     
     echo -e "${RED}Installing Fedora Development Tools package group${NC}"
     sudo dnf -yq groupinstall "Development Tools"
-    sudo dnf -yq install HandBrake
-    sudo dnf -yq install abcde flac flac-libs flac-devel ImageMagick ImageMagick-libs ImageMagick-devel \
-    cdparanoia cdparanoia-devel cdparanoia-libs cdparanoia-static
     
+    # consolidated multiple dnf installs to a single command
     # The last maintained package of glyr was from Fedora 33, Grabbing from archives
-    sudo dnf -yq install https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-libs-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-devel-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm
-    sudo dnf -yq install at
-    sudo dnf -yq install python3 python3-pip python-netifaces python3-devel
-    sudo dnf -yq install openssl openssl-devel libcurl libcurl-devel curl
     
+    sudo dnf -yq install HandBrake abcde flac flac-libs flac-devel ImageMagick ImageMagick-libs ImageMagick-devel \
+    cdparanoia cdparanoia-devel cdparanoia-libs cdparanoia-static python3 python3-pip python-netifaces python3-devel \
+    python3-wheel at openssl openssl-devel libcurl libcurl-devel curl libdvdread libdvdnav libdvdread-devel libdvdnav-devel \
+    lsdvd java-openjdk-headless zlib zlib-devel expat expat-devel ffmpeg ffmpeg-devel qt5-qtbase-devel ffmpeg-libs snapd \
+    https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-libs-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm \
+    https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm \
+    https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-devel-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm
+            
     # Add UnitedRPMS for dvdcss
+    
     sudo rpm --import https://raw.githubusercontent.com/UnitedRPMs/unitedrpms/master/URPMS-GPG-PUBLICKEY-Fedora
     sudo dnf -yq install https://github.com/UnitedRPMs/unitedrpms/releases/download/20/unitedrpms-$(rpm -E %fedora)-20.fc$(rpm -E %fedora).noarch.rpm
-    sudo dnf -yq install libdvdcss libdvdread libdvdnav libdvdcss-devel libdvdread-devel libdvdnav-devel
+    sudo dnf -yq install libdvdcss libdvdcss-devel
     
-    sudo dnf -yq install lsdvd
-    sudo dnf -yq install java-openjdk-headless
-
-    sudo dnf -yq install zlib zlib-devel expat expat-devel ffmpeg ffmpeg-devel qt5-qtbase-devel ffmpeg-libs
-    
-    # Installing snap in order to get makemkv
-    sudo dnf -yq install snapd
+        
+    # Installing makemkv via snap
     sudo ln -s /var/lib/snapd/snap /snap
     sudo snap install makemkv
     sudo ln -s /snap/bin/makemkv /usr/bin/makemkv
