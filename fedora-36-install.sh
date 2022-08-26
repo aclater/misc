@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Largely copied and adapted from https://github.com/automatic-ripping-machine/automatic-ripping-machine/blob/v2_master/scripts/ubuntu-20.04-install.sh
+
 RED='\033[1;31m'
 NC='\033[0m' # No Color
 
