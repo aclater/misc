@@ -47,25 +47,31 @@ function add_arm_user() {
 }
 
 function install_dev_requirements() {
+    
     echo -e "${RED}Installing ARM requirments${NC}"
+    
     echo -e "${RED}Installing RPMFusion free and nonfree${NC}"
     sudo dnf -yq install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
     https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+    
     echo -e "${RED}Installing Fedora Development Tools package group${NC}"
     sudo dnf -yq groupinstall "Development Tools"
-        sudo dnf -yq install HandBrake libavcodec-free libavcodec-free-devel
+    sudo dnf -yq install HandBrake libavcodec-free libavcodec-free-devel
     sudo dnf -yq install abcde flac flac-libs flac-devel ImageMagick ImageMagick-libs ImageMagick-devel \
     cdparanoia cdparanoia-devel cdparanoia-libs cdparanoia-static
+    
+    # The last maintained package of glyr was from Fedora 33, Grabbing from archives
     sudo dnf -yq install https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-libs-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/glyr-devel-1.0.10-13.20180824git618c418e.fc32.x86_64.rpm
     sudo dnf -yq install at
-    sudo dnf -yq install python3 python3-pip -y
+    sudo dnf -yq install python3 python3-pip
     sudo dnf -yq install openssl openssl-devel libcurl libcurl-devel curl
     
     # Add UnitedRPMS for dvdcss
     sudo rpm --import https://raw.githubusercontent.com/UnitedRPMs/unitedrpms/master/URPMS-GPG-PUBLICKEY-Fedora
     sudo dnf -yq install https://github.com/UnitedRPMs/unitedrpms/releases/download/20/unitedrpms-$(rpm -E %fedora)-20.fc$(rpm -E %fedora).noarch.rpm
     sudo dnf -yq install libdvdcss libdvdread libdvdnav libdvdcss-devel libdvdread-devel libdvdnav-devel
-    sudo dnf -yq install lsdvd -y
+    
+    sudo dnf -yq install lsdvd
     sudo dnf -yq install java-openjdk-headless
 
     sudo dnf -yq install zlib zlib-devel expat expat-devel ffmpeg ffmpeg-devel qt5-qtbase-devel ffmpeg-libs
