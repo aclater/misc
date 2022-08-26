@@ -59,7 +59,8 @@ function install_dev_requirements() {
     
     # consolidated multiple dnf installs to a single command
     # The last maintained package of glyr was from Fedora 33, Grabbing from archives
-    
+    echo -e "${RED}Installing Handbrake, abcde, cdparanoia, etc in support of ARM${NC}"
+
     sudo dnf -yq install HandBrake abcde flac flac-libs flac-devel ImageMagick ImageMagick-libs ImageMagick-devel \
     cdparanoia cdparanoia-devel cdparanoia-libs cdparanoia-static python3 python3-pip python-netifaces python3-devel \
     python3-wheel at openssl openssl-devel libcurl libcurl-devel curl libdvdread libdvdnav libdvdread-devel libdvdnav-devel \
