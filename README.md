@@ -12,3 +12,11 @@ These won't work with your webcam if it doesnt support "zoom_absolute"
 ## 00-kinit.sh
   Drop into /etc/NetworkManager/dispatcher.d/ to launch krb5-auth-dialog on VPN connect
 
+## Configuring Radarr on Fedora / RHEL
+https://www.reddit.com/r/radarr/comments/11bvg5b/running_on_fedora/
+
+## Configuring Sonarr on Fedora / RHEL
+https://www.reddit.com/r/sonarr/comments/11sg1ly/setup_on_fedora_server_36/
+
+## Sabnzbd
+RHEL - after you create a user for sabnzbd, su to the user and use pip to install required python extensions that don't ship with RHEL. If you do it as root, you'll bang up all the stuff.
