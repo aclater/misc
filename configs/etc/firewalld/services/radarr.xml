@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>radarr</short>
+  <description>Radarr Service</description>
+  <port port="7878" protocol="tcp"/>
+</service>

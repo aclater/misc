@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Roon Server</short>
+  <description>Roon Server from Roon Labs plays music according to instructions from Roon Controllers</description>
+  <port port="9003" protocol="udp"/>
+  <port port="9330-9339" protocol="tcp"/>
+  <port port="30000-30010" protocol="tcp"/>
+  <port port="55000" protocol="tcp"/>
+  <port port="32768-65535" protocol="udp"/>
+  <port port="5353" protocol="udp"/>
+  <protocol value="igmp"/>
+</service>

@@ -1,0 +1,16 @@
+#
+# Systemd unit file for SABnzbd
+#
+
+[Unit]
+Description=SABnzbd Daemon
+
+[Service]
+Type=forking
+User=sabnzbd
+Group=sabnzbd
+ExecStart=/usr/bin/python /opt/sabnzbd/SABnzbd.py --daemon --config-file=/opt/sabnzbd/sabnzbd_config.ini -s 0.0.0.0:8080
+GuessMainPID=no
+
+[Install]
+WantedBy=multi-user.target

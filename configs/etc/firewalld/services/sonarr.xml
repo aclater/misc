@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>sonarr</short>
+  <description>Sonarr Service</description>
+  <port port="8989" protocol="tcp"/>
+</service>

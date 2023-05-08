@@ -1,0 +1,15 @@
+[Unit]
+Description=Sonarr Daemon
+After=syslog.target network.target
+
+[Service]
+User=sonarr
+Group=media
+Type=simple
+ExecStart=mono --debug /opt/Sonarr/Sonarr.exe -nobrowser 
+TimeoutStopSec=20
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
