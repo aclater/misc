@@ -1,5 +1,0 @@
-<service>
-  <short>sabnzbd</short>
-  <description>SABnzbd Service</description>
-  <port protocol="tcp" port="8080"/>
-</service>

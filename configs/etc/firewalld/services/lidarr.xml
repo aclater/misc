@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<service>
-  <short>lidarr</short>
-  <description>Lidarr Service</description>
-  <port port="8686" protocol="tcp"/>
-</service>
