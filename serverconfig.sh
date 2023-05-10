@@ -28,7 +28,7 @@ groupadd media
 # set ownership on /opt & /var/lib resources
 # ${i^} prints $i with the first letter capitalized
 
-for i in lidarr radarr sonarr prowlarr
+for i in lidarr radarr sonarr prowlarr bazarr
 do
 	useradd $i -G media
 	chown -R $i:$i /var/lib/${i^}
@@ -60,7 +60,7 @@ firewall-cmd --reload
 # Enable our services
 for i in lidarr prowlarr radarr roon-server sabnzbd sonarr
 do
-	firewall-cmd --permanent --enable-service=$i
+	firewall-cmd --permanent --add-service=$i
 done
 
 # Start services
