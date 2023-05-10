@@ -10,7 +10,7 @@ dnf config-manager --set-enabled appstream baseos epel epel-next extras-common c
 dnf -y install --nogpgcheck https://dl.fedoraproject.org/pub/epel/epel-release-latest-$(rpm -E %rhel).noarch.rpm
 dnf -y install --nogpgcheck https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm https://mirrors.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-$(rpm -E %rhel).noarch.rpm https://forensics.cert.org/cert-forensics-tools-release-el9.rpm
 
-dnf -y install unrar python-devel pip tuned
+dnf -y install unrar python-devel pip tuned p7zip
 dnf -y groupinstall "Development Tools"
 
 dnf -y update
