@@ -1,0 +1,17 @@
+# flaresolverr.container
+[Container]
+Network=host
+ContainerName=flaresolverr
+Environment=LOG_LEVEL=info
+Image=ghcr.io/flaresolverr/flaresolverr:latest
+PublishPort=8191:8191
+AutoUpdate=registry
+
+
+UIDMap=+%U:@%U
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

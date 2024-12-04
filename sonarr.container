@@ -1,0 +1,20 @@
+# sonarr.container
+[Container]
+ContainerName=sonarr
+Network=host
+Environment=PUID=1001 PGID=1001 TZ=America/New_York
+Image=lscr.io/linuxserver/sonarr:latest
+PublishPort=8989:8989
+Volume=%h/sonarr/data:/config:Z
+Volume=/mnt/media/tv:/tv
+Volume=/download:/download:z
+UIDMap=+%U:@%U
+
+AutoUpdate=registry
+
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

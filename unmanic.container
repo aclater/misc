@@ -1,0 +1,30 @@
+# unmanic.container
+[Unit]
+Description=Podman - Unmanic
+Wants=network-online.target
+After=network-online.target
+
+
+
+
+[Container]
+ContainerName=unmanic
+Network=host
+Environment=PUID=1001 PGID=1001
+Image=docker.io/josh5/unmanic:latest
+PublishPort=8888:8888
+Volume=%h/unmanic/config:/config:Z
+Volume=/mnt/media/movies:/library:z
+Volume=/download/incomplete:/tmp/unmanic:z
+AddDevice=/dev/dri:/dev/dri/
+UIDMap=+%U:@%U
+AutoUpdate=registry
+PodmanArgs=--group-add 105
+
+[Service]
+Restart=always
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target
+

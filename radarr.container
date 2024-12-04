@@ -1,0 +1,19 @@
+# radarr.container
+[Container]
+ContainerName=radarr
+Network=host
+Environment=PUID=1001 PGID=1001 TZ=America/New_York
+Image=lscr.io/linuxserver/radarr:latest
+PublishPort=7878:7878
+Volume=%h/radarr/data:/config:Z
+Volume=/mnt/media/movies:/movies
+Volume=/download:/download:z
+UIDMap=+%U:@%U
+
+AutoUpdate=registry
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

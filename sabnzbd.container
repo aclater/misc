@@ -1,0 +1,21 @@
+# sabnzbd.container
+[Container]
+ContainerName=sabnzbd
+Network=host
+Environment=PUID=1001 PGID=1001 TZ=America/New_york
+Image=lscr.io/linuxserver/sabnzbd:latest
+PublishPort=8080:8080/tcp
+Volume=%h/sabnzbd/config:/config:Z
+Volume=/download/complete:/download/complete:z
+Volume=/download/incomplete:/download/incomplete:z
+#Volume=/download/incomplete:/incomplete-downloads:z
+UIDMap=+%U:@%U
+
+AutoUpdate=registry
+
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

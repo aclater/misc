@@ -1,0 +1,17 @@
+# docker-roonserver.container
+[Container]
+ContainerName=roonserver
+Environment=TZ=America/New_York
+Image=docker.io/steefdebruijn/docker-roonserver:latest
+Network=host
+Volume=%h/roon/app:/app:Z
+Volume=%h/roon/data:/data:Z
+Volume=/mnt/media/music:/music
+Volume=%h/roon/backups:/backup:Z
+UIDMap=+%U:@%U
+
+AutoUpdate=registry
+
+
+[Install]
+WantedBy=default.target

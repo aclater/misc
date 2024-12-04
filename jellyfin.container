@@ -1,0 +1,32 @@
+[Unit]
+Description=Podman - Jellyfin
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=lscr.io/linuxserver/jellyfin:latest
+Network=host
+AutoUpdate=registry
+ContainerName=jellyfin
+Environment=PUID=1001 
+Environment=PGID=1001
+Environment=TZ=America/New_York
+Environment=DOCKER_MODS=linuxserver/mods:jellyfin-opencl-intel
+AddDevice=/dev/dri/:/dev/dri/
+Volume=%h/jellyfin/config:/config:Z
+Volume=/mnt/media/movies:/movies
+Volume=/mnt/media/tv:/tv
+PublishPort=8096:8096/tcp
+PublishPort=8920:8920/tcp
+PublishPort=7359:7359/udp
+PublishPort=1900:1900/udp
+UIDMap=+%U:@%U
+AutoUpdate=registry
+PodmanArgs=--group-add 105
+[Service]
+Restart=always
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target
+

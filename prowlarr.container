@@ -1,0 +1,17 @@
+# prowlarr.container
+[Container]
+ContainerName=prowlarr
+Network=host
+Environment=PUID=1001 PGID=1001 TZ=America/New_York
+Image=lscr.io/linuxserver/prowlarr:latest
+PublishPort=9696:9696
+Volume=%h/prowlarr/data:/config:Z
+UIDMap=+%U:@%U
+
+AutoUpdate=registry
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
