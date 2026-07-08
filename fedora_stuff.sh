@@ -586,12 +586,19 @@ set -uo pipefail
 DB="sql:$HOME/.pki/nssdb"
 FCPCA_URL="http://repo.fpki.gov/fcpca/fcpcag2.crt"
 FCPCA_SIA_FALLBACK="http://repo.fpki.gov/fcpca/caCertsIssuedByfcpcag2.p7c"
-# Direct seed for the USDA branch, independent of SIA discovery through the
-# cross-cert: the Entrust Managed Services Root CA's own SIA bundle, which
-# contains the "Entrust Managed Services SSP CA" that issues USDA PIV certs
-# (URL confirmed by card recon + GSA FPKI notifications). Belt and suspenders —
-# processed even if the walk from FCPCA already found it (dedup'd by fingerprint).
-EXTRA_SIA_SEEDS="http://rootweb.managed.entrust.com/SIA/CertsIssuedByEMSRootCA.p7c"
+# Direct seeds for the USDA branch, independent of SIA discovery through the
+# cross-cert (URLs confirmed live via card recon + GSA FPKI notifications):
+#  - CertsIssuedByEMSRootCA.p7c: certs the EMS Root has ISSUED — contains the
+#    "Entrust Managed Services SSP CA" that issues USDA PIV certs.
+#  - CertsIssuedToEMSRootCA.p7c: certs issued TO the EMS Root — contains its
+#    SELF-SIGNED root cert (auto-promoted to trust anchor by import_cert) plus
+#    the FCPCA cross-certs. Directly trusting the self-signed EMS root matters:
+#    NSS validation through the FCPCA->EMS cross-cert path fails its policy
+#    processing, so the short chain (leaf -> SSP -> EMS root) is what browsers
+#    actually validate against — matching a known-good host's trust state.
+# Belt and suspenders — dedup'd by fingerprint if the walk already found them.
+EXTRA_SIA_SEEDS="http://rootweb.managed.entrust.com/SIA/CertsIssuedByEMSRootCA.p7c
+http://rootweb.managed.entrust.com/AIA/CertsIssuedToEMSRootCA.p7c"
 BRANCH_FILTER="entrust"   # descend only into CAs matching this (USDA's SSP branch)
 
 for t in certutil openssl curl; do
@@ -795,15 +802,46 @@ done
 
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 
-# Validate a cert file against the nssdb by temporary import (nick is unique and
-# removed afterwards, pass or fail). certutil -V is the NSS chain engine itself.
-#   $1 = pemfile, $2 = usage flag for certutil -V (C = SSL client, L = SSL CA)
+# Validate a cert FILE against the nssdb. $1 = pemfile, $2 = usage
+# (C = SSL client, L = SSL CA).
+#
+# Preferred engine is vfychain, which validates a file directly — but Fedora's
+# nss-tools does not ship it (Ubuntu's libnss3-tools does), so the fallback is
+# certutil with a DEDUP-SAFE strategy: certutil -A of a cert that already
+# exists in the db silently succeeds while keeping the ORIGINAL nickname, so a
+# temp-nickname -V would fail with "not found" and produce a FALSE NEGATIVE for
+# any cert the importers already landed. If the temp nickname doesn't
+# materialize, we locate the existing nickname by SHA-256 fingerprint and
+# validate that entry instead.
 validate_file() {
-  local f="$1" usage="$2" nick rc=1
+  local f="$1" usage="$2"
+  if command -v vfychain >/dev/null 2>&1; then
+    local u; case "$usage" in C) u=0 ;; L) u=3 ;; *) u="$usage" ;; esac
+    vfychain -d "$DB" -u "$u" -a "$f" >/dev/null 2>&1
+    return $?
+  fi
+  local nick rc=1 fp cfp line trustcol cand existing=""
   nick="__verify_tmp_$$_${RANDOM}"
-  if certutil -d "$DB" -A -n "$nick" -t ",," -i "$f" 2>/dev/null; then
-    if certutil -d "$DB" -V -u "$usage" -n "$nick" </dev/null >/dev/null 2>&1; then rc=0; fi
+  certutil -d "$DB" -A -n "$nick" -t ",," -i "$f" 2>/dev/null || return 1
+  if certutil -d "$DB" -L -n "$nick" >/dev/null 2>&1; then
+    # Cert was genuinely new: validate under the temp nickname, then remove it.
+    certutil -d "$DB" -V -u "$usage" -n "$nick" </dev/null >/dev/null 2>&1 && rc=0
     certutil -d "$DB" -D -n "$nick" 2>/dev/null
+  else
+    # Dedup case: the cert pre-existed under another nickname — find it.
+    fp=$(openssl x509 -in "$f" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+    while IFS= read -r line; do
+      line="${line%"${line##*[![:space:]]}"}"
+      trustcol=${line##* }; cand=${line%"$trustcol"}
+      cand="${cand%"${cand##*[![:space:]]}"}"
+      [ -n "$cand" ] || continue
+      cfp=$(certutil -d "$DB" -L -n "$cand" -a 2>/dev/null \
+              | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+      [ "$cfp" = "$fp" ] && { existing="$cand"; break; }
+    done < <(certutil -d "$DB" -L 2>/dev/null | tail -n +5)
+    if [ -n "$existing" ]; then
+      certutil -d "$DB" -V -u "$usage" -n "$existing" </dev/null >/dev/null 2>&1 && rc=0
+    fi
   fi
   return "$rc"
 }
@@ -844,16 +882,27 @@ if curl -fsS --max-time 25 -o "$work/ssp.p7c" "$SSP_AIA_URL"; then
   if openssl pkcs7 -inform DER -in "$work/ssp.p7c" -print_certs 2>/dev/null >"$work/ssp_all.pem" \
      || openssl pkcs7 -in "$work/ssp.p7c" -print_certs 2>/dev/null >"$work/ssp_all.pem"; then
     awk '/-----BEGIN CERTIFICATE-----/{n++} n>0{print > ("'"$work"'/ssp" n ".pem")}' "$work/ssp_all.pem"
-    live_ok=0
+    live_ok=0; diag_cert=""
     for c in "$work"/ssp[0-9]*.pem; do
       [ -s "$c" ] || continue
       openssl x509 -in "$c" -noout 2>/dev/null || continue
       if validate_file "$c" L; then live_ok=1; break; fi
+      diag_cert="$c"
     done
     if [ "$live_ok" -eq 1 ]; then
       ok "LIVE: real Entrust SSP CA cert validates as SSL CA against this trust store"
     else
       bad "LIVE: fetched SSP CA cert does NOT validate — chain to a trust anchor is broken here"
+      if [ -n "$diag_cert" ]; then
+        info "       candidate: $(openssl x509 -in "$diag_cert" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/^subject=//')"
+        info "       validity : $(openssl x509 -in "$diag_cert" -noout -enddate 2>/dev/null | cut -d= -f2)"
+        if command -v vfychain >/dev/null 2>&1; then
+          vfychain -d "$DB" -u 3 -a "$diag_cert" 2>&1 | grep -E 'ERROR|CERT [0-9]' | head -4 \
+            | while IFS= read -r l; do info "       NSS: $l"; done
+        else
+          info "       (inspect further with: certutil -d $DB -V -u L -n '<its nickname>')"
+        fi
+      fi
     fi
   else
     info "LIVE check skipped: could not parse the fetched AIA bundle"
