@@ -1389,6 +1389,67 @@ fwupd_run() {
 fwupd_run refresh --force
 fwupd_run update
 
+#
+# Fingerprint authentication — detect a fingerprint scanner, install fprintd,
+# enable the PAM module via authselect, and walk the user through enrollment.
+#
+# Detection: fprintd-list reports "found N devices" when a supported scanner is
+# present (even before enrollment). We install fprintd first so the detection
+# tool exists, then only proceed if hardware is actually there.
+#
+# Idempotent: each step checks current state before acting — re-running on a
+# host that already has fingerprint auth configured and enrolled is a no-op.
+#
+# This section is intentionally LAST: enrollment is interactive (the user must
+# swipe their finger on the sensor) and everything above it runs unattended.
+#
+if ! rpm -q fprintd fprintd-pam &>/dev/null; then
+  sudo dnf -y install fprintd fprintd-pam
+fi
+
+if fprintd-list "$USER" 2>/dev/null | grep -q 'found [1-9]'; then
+  echo
+  echo "======================================================================="
+  echo " Fingerprint scanner detected."
+  echo "======================================================================="
+
+  # Enable the PAM fingerprint module via authselect (idempotent — authselect
+  # enable-feature is a no-op if already active).
+  if authselect current --raw 2>/dev/null | grep -q 'with-fingerprint'; then
+    echo "authselect: with-fingerprint already enabled."
+  else
+    # Determine the active profile; default to 'sssd' (Fedora's default).
+    active_profile=$(authselect current --raw 2>/dev/null | awk '{print $1}')
+    active_profile="${active_profile:-sssd}"
+    sudo authselect enable-feature with-fingerprint
+    echo "authselect: enabled with-fingerprint on the '$active_profile' profile."
+  fi
+
+  # Enroll a fingerprint if none are registered for this user.
+  if fprintd-list "$USER" 2>/dev/null | grep -qE '^\s+-\s+#[0-9]+:'; then
+    echo "Fingerprint(s) already enrolled for $USER — skipping enrollment."
+  else
+    echo
+    echo "No fingerprints enrolled yet. You can enroll your right index finger now."
+    echo "You will need to swipe/press several times when prompted."
+    echo
+    read -rp "Enroll a fingerprint now? [Y/n] " fp_answer
+    case "${fp_answer,,}" in
+      n|no)
+        echo "Skipped. Enroll later with:  fprintd-enroll"
+        ;;
+      *)
+        fprintd-enroll -f right-index-finger || {
+          echo "WARN: enrollment failed or was cancelled. Enroll later with:  fprintd-enroll"
+        }
+        ;;
+    esac
+  fi
+else
+  echo "No fingerprint scanner detected — skipping fingerprint auth setup."
+fi
+
+echo
 echo "Done. Log out/in (or reboot) for shell extensions and group changes to fully apply."
 echo "YubiKey: lock-on-removal and wake-on-insert are active (udev rules loaded)."
 echo "         FIDO2/PAM enrollment steps are listed in the YubiKey section comments."
@@ -1396,3 +1457,7 @@ echo "PKI:     Federal/USDA and DoD CA bundles imported to ~/.pki/nssdb (no card
 echo "         needed) and self-checked above. On PATH for any host/user:"
 echo "         verify-pki-trust.sh (fleet PASS/FAIL) and piv-card-recon.sh (deep"
 echo "         diagnostics with the card inserted)."
+if fprintd-list "$USER" 2>/dev/null | grep -qE '^\s+-\s+#[0-9]+:'; then
+  echo "Fingerprint: enrolled and active for login, sudo, and screen unlock."
+  echo "             Re-enroll / add fingers with:  fprintd-enroll"
+fi
