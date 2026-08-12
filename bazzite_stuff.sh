@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
 # Bazzite (GNOME) post-install setup
-# Flatpak for GUI apps; rpm-ostree layering for CLI/system tools only.
-# Signal uses the official AppImage (GPG-verified).
+# Flatpak for GUI apps (incl. Signal); rpm-ostree layering for CLI/system tools only.
 #
 # Bazzite already ships with: Steam, GPU drivers (incl. NVIDIA), multimedia
 # codecs, RPMFusion repos, and auto-updates — those sections from the regular
@@ -41,6 +40,7 @@ flatpak install --noninteractive flathub \
   com.google.Chrome \
   org.videolan.VLC \
   org.ferdium.Ferdium \
+  org.signal.Signal \
   ca.desrt.dconf-editor
 
 #
@@ -62,7 +62,6 @@ if ! sudo rpm-ostree install --idempotent --apply-live \
   git btop fastfetch solaar mpv \
   yt-dlp 7zip unrar \
   rsms-inter-vf-fonts \
-  fuse-libs \
   ydotool pcsc-lite pcsc-lite-ccid pam-u2f pamu2fcfg yubikey-manager \
   opensc nss-tools openssl gnupg2 unzip \
   fprintd fprintd-pam \
@@ -111,82 +110,6 @@ gext_enable appindicatorsupport@rgcjonas.gmail.com
 gext_enable caffeine@patapon.info
 gext_enable blur-my-shell@aunetx
 gext_enable just-perfection-desktop@just-perfection
-
-#
-# Signal Desktop — official AppImage (GPG-verified). No flatpak needed.
-#
-SIGNAL_KEY_FPR="4B16B7232DFAA439AD791002EF9F501F13EED94C"
-
-curl -fsSL https://updates.signal.org/static/desktop/appimage.asc | gpg --import
-if ! gpg --with-colons --fingerprint "$SIGNAL_KEY_FPR" 2>/dev/null \
-     | grep -q "^fpr:::::::::${SIGNAL_KEY_FPR}:"; then
-  echo "ERROR: Signal signing key $SIGNAL_KEY_FPR not present after import." >&2
-  echo "Aborting before download." >&2
-  exit 1
-fi
-
-mkdir -p ~/.local/bin
-cat > ~/.local/bin/update-signal-appimage.sh <<'SIGEOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-SIGNAL_KEY_FPR="4B16B7232DFAA439AD791002EF9F501F13EED94C"
-
-curl -fsI --max-time 10 https://updates.signal.org >/dev/null 2>&1 \
-  || { echo "Signal: network unreachable, skipping."; exit 0; }
-
-dest="$HOME/Applications/Signal.AppImage"
-mkdir -p "$HOME/Applications"
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-curl -fL -o "$tmp/Signal.AppImage"     https://updates.signal.org/desktop/signal-desktop.AppImage
-curl -fL -o "$tmp/Signal.AppImage.gpg" https://updates.signal.org/desktop/signal-desktop.AppImage.gpg
-status=$(gpg --status-fd 1 --verify "$tmp/Signal.AppImage.gpg" "$tmp/Signal.AppImage" 2>/dev/null) || true
-if ! printf '%s\n' "$status" \
-     | grep -aEq "^\[GNUPG:\] VALIDSIG ([0-9A-F]{40} .* )?${SIGNAL_KEY_FPR}( |$)"; then
-  echo "Signal: signature not made by pinned key ${SIGNAL_KEY_FPR}; refusing to install." >&2
-  exit 1
-fi
-if [ -f "$dest" ] && cmp -s "$tmp/Signal.AppImage" "$dest"; then
-  echo "Signal already up to date."
-  exit 0
-fi
-chmod +x "$tmp/Signal.AppImage"
-mv -f "$tmp/Signal.AppImage" "$dest"
-echo "Signal updated."
-SIGEOF
-chmod +x ~/.local/bin/update-signal-appimage.sh
-
-~/.local/bin/update-signal-appimage.sh
-
-mkdir -p ~/.local/share/icons
-signal_icon="signal-desktop"
-if [ -f ~/.local/share/icons/signal.png ]; then
-  signal_icon="$HOME/.local/share/icons/signal.png"
-else
-  sig_tmp=$(mktemp -d)
-  if ( cd "$sig_tmp" && ~/Applications/Signal.AppImage --appimage-extract >/dev/null 2>&1 ) \
-     && cp -L "$sig_tmp/squashfs-root/.DirIcon" ~/.local/share/icons/signal.png 2>/dev/null; then
-    signal_icon="$HOME/.local/share/icons/signal.png"
-  else
-    echo "WARN: could not extract Signal icon from AppImage; launcher will use the themed name."
-  fi
-  rm -rf "$sig_tmp"
-fi
-
-mkdir -p ~/.local/share/applications
-cat > ~/.local/share/applications/signal.desktop <<EOF
-[Desktop Entry]
-Name=Signal
-Exec=$HOME/Applications/Signal.AppImage %U
-Terminal=false
-Type=Application
-Icon=$signal_icon
-Categories=Network;InstantMessaging;Chat;
-MimeType=x-scheme-handler/sgnl;x-scheme-handler/signalcaptcha;
-StartupWMClass=Signal
-EOF
-command -v update-desktop-database &>/dev/null \
-  && update-desktop-database ~/.local/share/applications || true
 
 #
 # YubiKey — lock the session when the key is removed, wake the display when it
@@ -859,34 +782,6 @@ gsettings set org.gnome.desktop.interface color-scheme 'default'
 gsettings set org.gnome.desktop.wm.preferences button-layout 'appmenu:minimize,maximize,close'
 gsettings set org.gnome.mutter center-new-windows true
 gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled true
-
-#
-# Signal update timer (AppImage needs its own updater; Flatpak apps auto-update)
-#
-mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/update-signal.service <<'EOF'
-[Unit]
-Description=Update Signal Desktop AppImage
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/bin/update-signal-appimage.sh
-EOF
-
-cat > ~/.config/systemd/user/update-signal.timer <<'EOF'
-[Unit]
-Description=Weekly Signal AppImage update check
-
-[Timer]
-OnCalendar=weekly
-Persistent=true
-RandomizedDelaySec=2h
-
-[Install]
-WantedBy=timers.target
-EOF
-systemctl --user daemon-reload
-systemctl --user enable --now update-signal.timer
 
 #
 # Fingerprint authentication — detect a fingerprint scanner, layer fprintd,
