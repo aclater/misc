@@ -65,6 +65,7 @@ if ! sudo rpm-ostree install --idempotent --apply-live \
   fuse-libs \
   ydotool pcsc-lite pcsc-lite-ccid pam-u2f pamu2fcfg yubikey-manager \
   opensc nss-tools openssl gnupg2 unzip \
+  fprintd fprintd-pam \
   vim-enhanced; then
   echo "WARN: --apply-live failed; layered packages are staged for next boot."
   echo "      GNOME extensions and some CLI tools may not work until you reboot."
@@ -238,15 +239,9 @@ set -uo pipefail
 DB="sql:$HOME/.pki/nssdb"
 FCPCA_URL="http://repo.fpki.gov/fcpca/fcpcag2.crt"
 
-declare -A NEED=( [certutil]=nss-tools [pkcs11-tool]=opensc [opensc-tool]=opensc [openssl]=openssl [curl]=curl )
-miss=()
-for t in "${!NEED[@]}"; do command -v "$t" >/dev/null 2>&1 || miss+=("${NEED[$t]}"); done
-if [ "${#miss[@]}" -gt 0 ]; then
-  mapfile -t miss < <(printf '%s\n' "${miss[@]}" | sort -u)
-  echo "Installing missing dependencies: ${miss[*]}"
-  sudo rpm-ostree install --apply-live --idempotent "${miss[@]}" \
-    || { echo "Could not install: ${miss[*]} — layer them with rpm-ostree and re-run."; exit 1; }
-fi
+for t in certutil pkcs11-tool opensc-tool openssl curl; do
+  command -v "$t" >/dev/null 2>&1 || { echo "Missing $t — layer nss-tools/opensc/openssl/curl with rpm-ostree and reboot, then re-run." >&2; exit 1; }
+done
 systemctl is-active --quiet pcscd 2>/dev/null || sudo systemctl enable --now pcscd.socket 2>/dev/null || true
 
 [ -f "$HOME/.pki/nssdb/cert9.db" ] || { mkdir -p "$HOME/.pki/nssdb"; certutil -d "$DB" -N --empty-password; }
@@ -347,7 +342,7 @@ http://rootweb.managed.entrust.com/AIA/CertsIssuedToEMSRootCA.p7c"
 BRANCH_FILTER="entrust"
 
 for t in certutil openssl curl; do
-  command -v "$t" >/dev/null 2>&1 || { echo "Missing $t — layer nss-tools/openssl/curl with rpm-ostree and re-run." >&2; exit 1; }
+  command -v "$t" >/dev/null 2>&1 || { echo "Missing $t — layer nss-tools/openssl/curl with rpm-ostree and reboot, then re-run." >&2; exit 1; }
 done
 [ -f "$HOME/.pki/nssdb/cert9.db" ] || { mkdir -p "$HOME/.pki/nssdb"; certutil -d "$DB" -N --empty-password; }
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT; cd "$work" || exit 1
@@ -425,7 +420,7 @@ DB="sql:$HOME/.pki/nssdb"
 DOD_ZIP_URL="https://dl.dod.cyber.mil/wp-content/uploads/pki-pke/zip/unclass-certificates_pkcs7_DoD.zip"
 
 for t in certutil openssl curl unzip; do
-  command -v "$t" >/dev/null 2>&1 || { echo "Missing $t — layer nss-tools/openssl/curl/unzip with rpm-ostree and re-run." >&2; exit 1; }
+  command -v "$t" >/dev/null 2>&1 || { echo "Missing $t — layer nss-tools/openssl/curl/unzip with rpm-ostree and reboot, then re-run." >&2; exit 1; }
 done
 
 [ -f "$HOME/.pki/nssdb/cert9.db" ] || { mkdir -p "$HOME/.pki/nssdb"; certutil -d "$DB" -N --empty-password; }
@@ -493,7 +488,7 @@ info(){ printf '  [ -- ] %s\n' "$*"; }
 hr()  { printf -- '---------------------------------------------------------------\n'; }
 
 for t in certutil openssl curl; do
-  command -v "$t" >/dev/null 2>&1 || { echo "Missing $t — layer nss-tools/openssl/curl with rpm-ostree and re-run."; exit 2; }
+  command -v "$t" >/dev/null 2>&1 || { echo "Missing $t — layer nss-tools/openssl/curl with rpm-ostree and reboot, then re-run."; exit 2; }
 done
 
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
@@ -652,7 +647,7 @@ for t in pkcs11-tool opensc-tool openssl curl certutil p11-kit; do
   if command -v "$t" >/dev/null 2>&1; then ok "$t $(command -v "$t")"
   else bad "$t missing"; missing=1; fi
 done
-[ "$missing" -eq 1 ] && { echo; echo "Layer missing tools (rpm-ostree install opensc nss-tools openssl p11-kit) and re-run."; exit 1; }
+[ "$missing" -eq 1 ] && { echo; echo "Layer missing tools (rpm-ostree install opensc nss-tools openssl p11-kit) and reboot, then re-run."; exit 1; }
 
 hr; echo "1. Smartcard stack"
 if systemctl is-active --quiet pcscd 2>/dev/null || systemctl is-active --quiet pcscd.socket 2>/dev/null; then
@@ -824,20 +819,27 @@ echo "Recon complete. Nothing was modified. Paste this output back for analysis.
 RECONEOF
 chmod +x ~/.local/bin/piv-card-recon.sh
 
-# Run card-free PKI imports now (non-fatal).
-~/.local/bin/import-federal-cas.sh \
-  || echo "WARN: Federal/USDA PKI import failed — run import-federal-cas.sh manually."
-~/.local/bin/import-dod-cas.sh \
-  || echo "WARN: DoD PKI import failed — run import-dod-cas.sh manually."
+# Run card-free PKI imports now (non-fatal). These need certutil (nss-tools),
+# which was layered in the main rpm-ostree call. If --apply-live didn't stick,
+# defer to after reboot rather than triggering another rpm-ostree transaction.
+if command -v certutil &>/dev/null; then
+  ~/.local/bin/import-federal-cas.sh \
+    || echo "WARN: Federal/USDA PKI import failed — run import-federal-cas.sh manually."
+  ~/.local/bin/import-dod-cas.sh \
+    || echo "WARN: DoD PKI import failed — run import-dod-cas.sh manually."
 
-if opensc-tool -l 2>/dev/null | grep -q 'Yes'; then
-  ~/.local/bin/import-piv-cas.sh || echo "WARN: PIV CA import failed; run import-piv-cas.sh manually with the card inserted."
+  if opensc-tool -l 2>/dev/null | grep -q 'Yes'; then
+    ~/.local/bin/import-piv-cas.sh || echo "WARN: PIV CA import failed; run import-piv-cas.sh manually with the card inserted."
+  else
+    echo "No PIV card detected (fine — Federal chain already imported card-free above)."
+  fi
+
+  ~/.local/bin/verify-pki-trust.sh \
+    || echo "WARN: PKI self-check reported failures above — fix and re-run verify-pki-trust.sh."
 else
-  echo "No PIV card detected (fine — Federal chain already imported card-free above)."
+  echo "WARN: certutil not available yet (reboot needed for layered packages)."
+  echo "      After reboot, run: import-federal-cas.sh && import-dod-cas.sh && verify-pki-trust.sh"
 fi
-
-~/.local/bin/verify-pki-trust.sh \
-  || echo "WARN: PKI self-check reported failures above — fix and re-run verify-pki-trust.sh."
 
 #
 # Fonts / desktop tweaks (gsettings work the same on Bazzite GNOME)
@@ -890,12 +892,6 @@ systemctl --user enable --now update-signal.timer
 # Fingerprint authentication — detect a fingerprint scanner, layer fprintd,
 # enable the PAM module via authselect, and walk the user through enrollment.
 #
-if ! rpm -q fprintd fprintd-pam &>/dev/null; then
-  if ! sudo rpm-ostree install --apply-live --idempotent fprintd fprintd-pam; then
-    echo "WARN: fprintd staged for next boot; fingerprint setup deferred until reboot."
-  fi
-fi
-
 if command -v fprintd-list &>/dev/null && fprintd-list "$USER" 2>/dev/null | grep -q 'found [1-9]'; then
   echo
   echo "======================================================================="
