@@ -21,6 +21,23 @@ https://www.reddit.com/r/sonarr/comments/11sg1ly/setup_on_fedora_server_36/
 ## Sabnzbd
 RHEL - after you create a user for sabnzbd, su to the user and use pip to install required python extensions that don't ship with RHEL. If you do it as root, you'll bang up all the stuff.
 
+# fedora_stuff.sh: Fedora post-install
+The first thing to run after a fresh Fedora Workstation install: one
+self-contained file (download it, read it, run it as your normal user; it
+asks for sudo when needed). It sets up repos, codecs, apps, GNOME settings,
+PKI trust, updaters and firmware, and ends with the interactive, hardware-
+detected steps:
+- **Laptop Wi-Fi protection:** on a laptop (systemd chassis type, or a
+  battery), it offers to install [roam-guard](#roam-guard) and to trust the
+  network you're on as home. Override with `ROAM_GUARD=yes` or `ROAM_GUARD=no`;
+  without a terminal it installs with no trusted networks (the secure default).
+- **Fingerprint enrollment**, when a supported reader is present.
+
+Tools it installs are embedded in the file rather than downloaded. The
+embedded roam-guard must match `bin/roam-guard`: run
+`tools/embed-roam-guard.sh` after editing `bin/roam-guard`, and
+`tools/embed-roam-guard.sh --check` before committing.
+
 # Personal tools (bin/)
 Day-to-day tools for a Fedora laptop that travels. `./install-bin.sh` links
 everything in `bin/` into `~/.local/bin` and the units in `systemd/user/` into
@@ -46,6 +63,8 @@ roam-guard trust [NAME]     # trust a network (default: the current one)
 Settings: `/etc/roam-guard/config`, trusted networks: `/etc/roam-guard/trusted`.
 Needs NetworkManager, firewalld, systemd-resolved, chrony, iw. Re-run
 `roam-guard install` after editing the script.
+`fedora_stuff.sh` embeds a copy for fresh installs; keep it in step with
+`tools/embed-roam-guard.sh`.
 
 ## vm-run
 Rate-limited launcher for test VMs: `vm-run [--name N] qemu-system-x86_64 ...`.

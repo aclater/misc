@@ -1390,6 +1390,514 @@ fwupd_run refresh --force
 fwupd_run update
 
 #
+# Laptop Wi-Fi protection (roam-guard) — laptops only, asks first.
+#
+# roam-guard (bin/roam-guard in this repo, embedded below so this file stays
+# self-contained) locks the machine down and tunes Wi-Fi on every network it
+# joins: drop-zone firewall on unknown networks, per-network random MAC, no
+# hostname in DHCP, avahi masked, LLMNR/mDNS off, encrypted DNS when possible,
+# authenticated (NTS) time, open networks never auto-join, regulatory domain
+# and timezone follow the access points' country, power saving by power source.
+# Every change it makes is a desktop notification (`roam-guard log`).
+#
+# Detection: systemd's chassis type (laptop/convertible/tablet), or a battery.
+# Override with ROAM_GUARD=yes|no in the environment.
+#
+is_laptop() {
+  case "$(hostnamectl chassis 2>/dev/null)" in
+    laptop|convertible|tablet|handset) return 0 ;;
+  esac
+  ls /sys/class/power_supply/BAT* >/dev/null 2>&1
+}
+
+rg_answer="${ROAM_GUARD:-}"
+if [ -z "$rg_answer" ]; then
+  if is_laptop; then
+    echo
+    echo "======================================================================="
+    echo " Laptop detected ($(hostnamectl chassis 2>/dev/null || echo battery present))."
+    echo "======================================================================="
+    echo "roam-guard locks this laptop down on networks you don't trust (hotels,"
+    echo "trains, conferences) and tunes Wi-Fi on every join. Details: roam-guard --help"
+    if [ -t 0 ]; then
+      read -rp "Install roam-guard now? [Y/n] " rg_answer
+      rg_answer="${rg_answer:-yes}"
+    else
+      rg_answer=yes   # unattended: the secure default; no network is trusted
+    fi
+  else
+    rg_answer=no
+    echo "Not a laptop ($(hostnamectl chassis 2>/dev/null || echo unknown chassis)) — skipping roam-guard (ROAM_GUARD=yes to force)."
+  fi
+fi
+
+case "${rg_answer,,}" in
+  y|yes)
+    rpm -q iw &>/dev/null || sudo dnf -y install iw
+    install -d "$HOME/.local/bin"
+cat > "$HOME/.local/bin/roam-guard" <<'ROAM_GUARD_EOF'
+#!/usr/bin/env bash
+#
+# roam-guard: lock this laptop down and tune Wi-Fi on every network you join.
+#
+#   roam-guard install                 install or update (asks for sudo), apply to the current network
+#   roam-guard status                  what's in effect right now (no root needed)
+#   roam-guard trust [NAME]            trust a network (default: the one you're on)
+#   roam-guard untrust NAME            stop trusting it
+#   roam-guard trusted                 list trusted networks
+#   roam-guard log [N]                 the last N changes roam-guard made (default 30)
+#   roam-guard undo                    remove everything roam-guard installed (asks for sudo)
+#   ROAM_GUARD_DRYRUN=1 roam-guard hook wlp192s0 up   preview a join, change nothing
+#
+# Source of truth: ~/.local/bin/roam-guard. Install copies it to a root-owned
+# /usr/local/sbin/roam-guard, and the hook runs that copy: a root hook must
+# never execute a file your user account can modify. Re-run `roam-guard
+# install` after editing the script. Trusted networks live in
+# /etc/roam-guard/trusted; manage them with trust/untrust, no reinstall needed.
+#
+# Installed once, it runs from a NetworkManager dispatcher hook on every
+# connection that comes up:
+#
+#   Everywhere (installed defaults)
+#     • firewall: 'drop' is the default zone, so unknown networks get no inbound
+#     • MAC: a stable random address per network (stable-ssid); random while scanning
+#     • IPv6: temporary privacy addresses
+#     • LLMNR and systemd-resolved's mDNS off (spoofable broadcast name lookups)
+#     • DHCP doesn't send the hostname (it would identify you across networks
+#       and defeat MAC randomisation); trusted networks still get it
+#     • time: authenticated NTS sources added to chrony
+#   Untrusted networks (anything not in the trusted list)
+#     • avahi masked (it's socket-activated, so stopping it isn't enough), wsdd stopped
+#     • LLMNR/mDNS off on the link; DNS-over-TLS opportunistic (falls back on
+#       captive portals and networks that block it)
+#     • NTP servers handed out by the network's DHCP are ignored
+#     • open networks (no password, or OWE "Enhanced Open") stop auto-joining:
+#       anyone can broadcast the same name; you stay connected, and join
+#       manually next time
+#   Trusted networks
+#     • pinned to TRUSTED_ZONE; avahi allowed
+#   Wi-Fi tuning on every Wi-Fi join
+#     • regulatory domain follows the country the access points advertise
+#       (channels and transmit power legal and optimal wherever you are)
+#     • timezone follows that country when it has one time zone (GNOME's
+#       automatic timezone needs a network lookup that fails on flaky or
+#       captive Wi-Fi); several zones: you're told, nothing changes
+#   Nothing silent: every change (regulatory domain, timezone, trust) is a
+#   desktop notification and a CHANGE line in the journal (roam-guard log).
+#   Settings: /etc/roam-guard/config (AUTO_TIMEZONE=yes|notify|no, NOTIFY=yes|no)
+#     • power saving off on mains power (latency), on when on battery
+#     • wake-on-WLAN off
+#
+# Logs to the journal: journalctl -t roam-guard
+# Replaces wifi-optimize.sh, harden-roaming.sh and harden-roaming.yml (kept in
+# ~/.local/share/roam-guard/retired/).
+set -euo pipefail
+
+# ------------------------------------------------------------------ config ---
+DEFAULT_TRUSTED=()                # seeds the trusted list on first install; add yours with `roam-guard trust`
+TRUSTED_ZONE="FedoraWorkstation"
+AWAY_ZONE="drop"
+# -----------------------------------------------------------------------------
+
+ORIG_ARGS=("$@")
+TRUST_FILE="/etc/roam-guard/trusted"   # one NetworkManager connection name per line
+CONFIG_FILE="/etc/roam-guard/config"
+CHRONY_DIR="/etc/roam-guard/chrony"            # NTS time sources (chrony sourcedir)
+AUTOCONNECT_LOG="/etc/roam-guard/autoconnect-disabled"   # restored by undo
+NTS_SERVERS=(time.cloudflare.com nts.netnod.se ptbtime1.ptb.de)
+AUTO_TIMEZONE=yes   # yes | notify | no   (override in /etc/roam-guard/config)
+NOTIFY=yes          # desktop notification for every change roam-guard makes
+# shellcheck source=/dev/null
+[ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+SELF_DEST="/usr/local/sbin/roam-guard"
+HOOK="/etc/NetworkManager/dispatcher.d/50-roam-guard"
+NM_CONF="/etc/NetworkManager/conf.d/50-roam-guard.conf"
+RESOLVED_CONF="/etc/systemd/resolved.conf.d/50-roam-guard.conf"
+# Files from the scripts roam-guard replaces
+LEGACY=(/etc/NetworkManager/dispatcher.d/50-away-privacy.sh
+        /etc/NetworkManager/conf.d/99-wifi-optimize.conf
+        /etc/NetworkManager/conf.d/50-ipv6-privacy.conf
+        /etc/systemd/resolved.conf.d/50-no-llmnr-mdns.conf)
+
+DRYRUN=${ROAM_GUARD_DRYRUN:-0}
+
+log() {   # journal + stderr; dry runs never touch the journal
+    [ "$DRYRUN" = 1 ] || logger -t roam-guard -- "$*" 2>/dev/null || true
+    echo "roam-guard: $*" >&2
+}
+is_open() {   # no password, or OWE "Enhanced Open": encrypted but anyone can impersonate it
+    case "$(nmcli -g 802-11-wireless-security.key-mgmt connection show "$1" 2>/dev/null)" in
+        ""|owe) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+notify() {   # desktop notification to every logged-in graphical user
+    [ "$NOTIFY" = yes ] || return 0
+    if [ "$DRYRUN" = 1 ]; then echo "  would notify: $*" >&2; return 0; fi
+    local sid uid user type
+    while read -r sid uid user _; do
+        type=$(loginctl show-session "$sid" -p Type --value 2>/dev/null)
+        case "$type" in wayland|x11) ;; *) continue ;; esac
+        [ -S "/run/user/$uid/bus" ] || continue
+        runuser -u "$user" -- env DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+            notify-send -a roam-guard -i network-wireless-symbolic "roam-guard" "$*" >/dev/null 2>&1 || true
+    done < <(loginctl list-sessions --no-legend 2>/dev/null)
+}
+change() {   # a change roam-guard made: journal + desktop notification
+    log "CHANGE: $*"
+    notify "$*"
+}
+tz_follow() {   # tz_follow <country>: match the timezone to where the APs say we are
+    local cc=$1 cur zones offs z
+    [ "$AUTO_TIMEZONE" = no ] && return 0
+    cur=$(timedatectl show -p Timezone --value 2>/dev/null)
+    mapfile -t zones < <(awk -F'\t' -v c="$cc" '!/^#/ && $1==c {print $3}' /usr/share/zoneinfo/zone.tab)
+    [ "${#zones[@]}" -gt 0 ] || return 0
+    for z in "${zones[@]}"; do [ "$z" = "$cur" ] && return 0; done   # already in a zone of that country
+    offs=$(for z in "${zones[@]}"; do TZ=$z date +%z; done | sort -u | wc -l)
+    if [ "$offs" -ne 1 ]; then
+        change "access points say $cc, which has several time zones; timezone left at $cur (set it in Settings if it's wrong)"
+        return 0
+    fi
+    if [ "$AUTO_TIMEZONE" = yes ]; then
+        run timedatectl set-timezone "${zones[0]}" || true
+        change "timezone $cur -> ${zones[0]} (access points advertise $cc)"
+    else
+        change "access points advertise $cc but the timezone is $cur; run: timedatectl set-timezone ${zones[0]}"
+    fi
+}
+run() {   # run a command quietly; in dry-run mode, only print it
+    if [ "$DRYRUN" = 1 ]; then echo "  would run: $*" >&2; return 0; fi
+    "$@" >/dev/null 2>&1
+}
+TRUSTED_CONNS=()
+if [ -r "$TRUST_FILE" ]; then
+    while IFS= read -r line; do [ -n "$line" ] && TRUSTED_CONNS+=("$line"); done <"$TRUST_FILE"
+else
+    TRUSTED_CONNS=("${DEFAULT_TRUSTED[@]}")
+fi
+is_trusted() { local n; for n in "${TRUSTED_CONNS[@]}"; do [ "$1" = "$n" ] && return 0; done; return 1; }
+# Re-run the whole command line under sudo (not just this function's args).
+need_root() { [ "$(id -u)" -eq 0 ] || [ "$DRYRUN" = 1 ] || exec sudo -E bash "$0" "${ORIG_ARGS[@]}"; }
+active_conn() {   # first active Wi-Fi/Ethernet connection: name:device:type
+    nmcli -t -f NAME,DEVICE,TYPE connection show --active |
+        awk -F: '$3=="802-11-wireless" || $3=="802-3-ethernet" {print; exit}'
+}
+beacon_country() {   # most common 802.11d country advertised by visible APs
+    iw dev "$1" scan dump 2>/dev/null |
+        awk '/Country:/{c[$2]++} END{for (k in c) if (c[k] > n && k ~ /^[A-Z][A-Z]$/ && k != "XX") {n=c[k]; b=k}; print b}'
+}
+on_battery() {
+    local s
+    for s in /sys/class/power_supply/*; do
+        [ "$(cat "$s/type" 2>/dev/null)" = Mains ] || continue
+        [ "$(cat "$s/online" 2>/dev/null)" = 1 ] && return 1
+    done
+    # No mains supply reporting online: on battery (or a desktop without one).
+    ls /sys/class/power_supply/BAT* >/dev/null 2>&1
+}
+
+# ------------------------------------------------------------ per-join hook ---
+apply() {   # apply <iface> <connection name> <connection type>
+    local iface=$1 conn=$2 ctype=$3
+    if is_trusted "$conn"; then
+        run firewall-cmd --zone="$TRUSTED_ZONE" --change-interface="$iface" || true
+        run systemctl unmask avahi-daemon.socket avahi-daemon.service || true
+        run systemctl start avahi-daemon.socket || true
+        log "$conn ($iface): trusted, zone=$TRUSTED_ZONE, avahi on"
+    else
+        run systemctl mask --now avahi-daemon.socket avahi-daemon.service || true
+        run systemctl stop wsdd.service || true
+        run resolvectl llmnr "$iface" no || true
+        run resolvectl mdns "$iface" no || true
+        run resolvectl dnsovertls "$iface" opportunistic || true
+        # Time: ignore NTP servers handed out by this network's DHCP (a hostile
+        # network could shift the clock and break TLS and 2FA); NTS sources stay.
+        if [ -e "/run/chrony-dhcp/$iface.sources" ]; then
+            run rm -f "/run/chrony-dhcp/$iface.sources"
+            run chronyc reload sources || true
+            log "$iface: ignoring DHCP-provided NTP servers"
+        fi
+        # Open networks never auto-join: anyone can broadcast the same name.
+        if [ "$ctype" = 802-11-wireless ] &&
+           is_open "$conn" &&
+           [ "$(nmcli -g connection.autoconnect connection show "$conn" 2>/dev/null)" = yes ]; then
+            run nmcli connection modify "$conn" connection.autoconnect no || true
+            [ "$DRYRUN" = 1 ] || printf '%s\n' "$conn" >>"$AUTOCONNECT_LOG"
+            change "open network '$conn' won't auto-join again (anyone can broadcast that name); you stay connected now, join it manually next time"
+        fi
+        log "$conn ($iface): untrusted, zone=$(firewall-cmd --get-zone-of-interface="$iface" 2>/dev/null || echo "$AWAY_ZONE"), avahi masked, DoT opportunistic"
+    fi
+    if [ "$ctype" = 802-11-wireless ]; then
+        # Regulatory domain: follow the country the access points advertise
+        # (802.11d Country element), so channels and transmit power match
+        # where you are. No lookup service; nothing leaves the machine. If no
+        # AP advertises a country, leave the setting alone.
+        local cc cur
+        cc=$(beacon_country "$iface")
+        cur=$(iw reg get 2>/dev/null | awk '/^global/{g=1; next} g && /^country/{sub(":","",$2); print $2; exit}')
+        if [ -n "$cc" ] && [ "$cc" != "$cur" ]; then
+            run iw reg set "$cc" || true
+            change "Wi-Fi regulatory domain ${cur:-unset} -> $cc (advertised by the access points)"
+        fi
+        [ -n "$cc" ] && tz_follow "$cc"
+        if on_battery; then
+            run iw dev "$iface" set power_save on || true
+            log "$iface: on battery, Wi-Fi power saving on"
+        else
+            run iw dev "$iface" set power_save off || true
+            log "$iface: on mains, Wi-Fi power saving off"
+        fi
+    fi
+}
+
+hook() {    # called by NetworkManager: hook <iface> <action>
+    local iface=${1:-} action=${2:-}
+    [ "$action" = up ] || exit 0
+    local conn=${CONNECTION_ID:-} ctype=""
+    if [ -z "$conn" ]; then
+        conn=$(nmcli -g GENERAL.CONNECTION device show "$iface" 2>/dev/null || true)
+    fi
+    ctype=$(nmcli -g connection.type connection show "${CONNECTION_UUID:-$conn}" 2>/dev/null || true)
+    case "$ctype" in 802-11-wireless|802-3-ethernet) ;; *) exit 0 ;; esac
+    apply "$iface" "$conn" "$ctype"
+}
+
+# ------------------------------------------------------------------ install ---
+install_all() {
+    need_root "$@"
+    echo ">> 1/5 install $SELF_DEST and the dispatcher hook"
+    run install -m 0755 "$0" "$SELF_DEST"
+    if [ "$DRYRUN" != 1 ]; then
+        printf '%s\n' '#!/bin/sh' '# managed by roam-guard' \
+            "exec $SELF_DEST hook \"\$@\"" >"$HOOK"
+        chmod 0755 "$HOOK"
+        restorecon "$SELF_DEST" "$HOOK" 2>/dev/null || true
+    fi
+
+    if [ ! -e "$CONFIG_FILE" ] && [ "$DRYRUN" != 1 ]; then
+        install -d -m 0755 "$(dirname "$CONFIG_FILE")"
+        printf '%s\n' '# roam-guard settings (sourced as shell; root-owned)' \
+            '# AUTO_TIMEZONE: yes = switch when the access points country has one time zone' \
+            '#                notify = only tell me; no = leave the timezone alone' \
+            'AUTO_TIMEZONE=yes' \
+            '# NOTIFY: desktop notification for every change roam-guard makes' \
+            'NOTIFY=yes' >"$CONFIG_FILE"
+        chmod 0644 "$CONFIG_FILE"
+    fi
+    if [ ! -e "$TRUST_FILE" ] && [ "$DRYRUN" != 1 ]; then
+        install -d -m 0755 "$(dirname "$TRUST_FILE")"
+        printf '%s\n' "${DEFAULT_TRUSTED[@]}" >"$TRUST_FILE"
+        chmod 0644 "$TRUST_FILE"
+    fi
+    echo ">> 2/5 NetworkManager defaults: per-network MAC, scan randomisation, IPv6 privacy, no hostname in DHCP"
+    if [ "$DRYRUN" != 1 ]; then
+        printf '%s\n' '# managed by roam-guard' \
+            '[device]' 'wifi.scan-rand-mac-address=yes' '' \
+            '[connection]' 'wifi.cloned-mac-address=stable-ssid' \
+            'wifi.wake-on-wlan=0' 'wifi.powersave=2' 'ipv6.ip6-privacy=2' \
+            'ipv4.dhcp-send-hostname=0' 'ipv6.dhcp-send-hostname=0' >"$NM_CONF"
+    fi
+
+    echo ">> 3/5 systemd-resolved: LLMNR and mDNS off (avahi handles .local at home)"
+    if [ "$DRYRUN" != 1 ]; then
+        install -d -m 0755 /etc/systemd/resolved.conf.d
+        printf '%s\n' '# managed by roam-guard' '[Resolve]' 'LLMNR=no' 'MulticastDNS=no' >"$RESOLVED_CONF"
+    fi
+
+    echo ">> 4/5 firewall: '$AWAY_ZONE' by default (DHCPv6 allowed), trusted networks pinned"
+    if ! firewall-cmd --permanent --zone="$AWAY_ZONE" --query-service=dhcpv6-client >/dev/null 2>&1; then
+        run firewall-cmd --permanent --zone="$AWAY_ZONE" --add-service=dhcpv6-client
+    fi
+    run firewall-cmd --set-default-zone="$AWAY_ZONE" || true
+    run firewall-cmd --reload
+    local c
+    for c in "${TRUSTED_CONNS[@]}"; do
+        if nmcli -t -f NAME connection show | grep -qxF "$c"; then
+            run nmcli connection modify "$c" connection.zone "$TRUSTED_ZONE" \
+                ipv4.dhcp-send-hostname yes ipv6.dhcp-send-hostname yes
+        fi
+    done
+
+    echo ">>      time: authenticated NTS sources; DHCP-provided NTP ignored on untrusted networks"
+    if [ "$DRYRUN" != 1 ]; then
+        install -d -m 0755 "$CHRONY_DIR"
+        for c in "${NTS_SERVERS[@]}"; do echo "server $c iburst nts"; done >"$CHRONY_DIR/nts.sources"
+        grep -qxF "sourcedir $CHRONY_DIR  # roam-guard" /etc/chrony.conf ||
+            echo "sourcedir $CHRONY_DIR  # roam-guard" >>/etc/chrony.conf
+        restorecon -R "$CHRONY_DIR" 2>/dev/null || true
+    fi
+    run systemctl restart chronyd
+
+    echo ">>      open networks: stop auto-joining saved open networks"
+    local opened=() n
+    while IFS=: read -r n ctype c; do
+        [ "$ctype" = 802-11-wireless ] && [ "$c" = yes ] || continue
+        is_trusted "$n" && continue
+        is_open "$n" || continue
+        run nmcli connection modify "$n" connection.autoconnect no
+        [ "$DRYRUN" = 1 ] || printf '%s\n' "$n" >>"$AUTOCONNECT_LOG"
+        opened+=("$n")
+    done < <(nmcli -t -f NAME,TYPE,AUTOCONNECT connection show)
+    [ "${#opened[@]}" -eq 0 ] || change "these open networks won't auto-join any more: ${opened[*]}"
+
+    echo ">> 5/5 retire the old scripts' files, reload, apply to the current network"
+    for c in "${LEGACY[@]}"; do [ -e "$c" ] && run rm -f "$c"; done
+    run systemctl restart systemd-resolved
+    run nmcli general reload conf
+    local dev conn ctype
+    while IFS=: read -r conn dev ctype; do
+        [ -n "$dev" ] || continue
+        case "$ctype" in 802-11-wireless|802-3-ethernet) apply "$dev" "$conn" "$ctype" ;; esac
+    done < <(nmcli -t -f NAME,DEVICE,TYPE connection show --active)
+    echo
+    status
+}
+
+undo() {
+    need_root "$@"
+    echo ">> removing roam-guard"
+    run rm -f "$HOOK" "$NM_CONF" "$RESOLVED_CONF" "$SELF_DEST"
+    if [ "$DRYRUN" != 1 ]; then
+        sed -i "\\|^sourcedir $CHRONY_DIR  # roam-guard\$|d" /etc/chrony.conf
+        rm -rf "$CHRONY_DIR"
+        if [ -r "$AUTOCONNECT_LOG" ]; then
+            sort -u "$AUTOCONNECT_LOG" | while IFS= read -r n; do
+                nmcli connection modify "$n" connection.autoconnect yes 2>/dev/null || true
+            done
+            rm -f "$AUTOCONNECT_LOG"
+        fi
+    fi
+    run systemctl restart chronyd
+    run firewall-cmd --set-default-zone="$TRUSTED_ZONE" || true
+    local c
+    for c in "${TRUSTED_CONNS[@]}"; do
+        run nmcli connection modify "$c" connection.zone "" \
+            ipv4.dhcp-send-hostname default ipv6.dhcp-send-hostname default || true
+    done
+    run systemctl unmask avahi-daemon.socket avahi-daemon.service || true
+    run systemctl start avahi-daemon.socket || true
+    run systemctl restart systemd-resolved
+    run nmcli general reload conf
+    echo ">> removed: default zone=$TRUSTED_ZONE, avahi restored, NetworkManager and resolved defaults back to stock"
+}
+
+# ------------------------------------------------------------------ trust ---
+trust() {   # trust [NAME]: default is the network you're on
+    local name=${1:-} info dev ctype
+    if [ -z "$name" ]; then
+        info=$(active_conn); name=${info%%:*}
+        [ -n "$name" ] || { echo "not connected; give a connection name" >&2; exit 2; }
+    fi
+    nmcli -t -f NAME connection show | grep -qxF "$name" || { echo "no saved connection named '$name'" >&2; exit 2; }
+    need_root
+    if [ "$DRYRUN" = 1 ]; then
+        echo "  would add '$name' to $TRUST_FILE" >&2
+    else
+        install -d -m 0755 "$(dirname "$TRUST_FILE")"
+        touch "$TRUST_FILE"
+        grep -qxF "$name" "$TRUST_FILE" || printf '%s\n' "$name" >>"$TRUST_FILE"
+    fi
+    run nmcli connection modify "$name" connection.zone "$TRUSTED_ZONE" \
+        ipv4.dhcp-send-hostname yes ipv6.dhcp-send-hostname yes
+    TRUSTED_CONNS+=("$name")
+    info=$(active_conn)
+    if [ "${info%%:*}" = "$name" ]; then
+        dev=$(echo "$info" | cut -d: -f2); ctype=$(echo "$info" | cut -d: -f3)
+        apply "$dev" "$name" "$ctype"
+    fi
+    change "trusted network: $name"
+}
+
+untrust() {   # untrust NAME
+    local name=${1:-} info dev ctype keep=()
+    if [ -z "$name" ]; then
+        info=$(active_conn); name=${info%%:*}
+    fi
+    [ -n "$name" ] || { echo "usage: roam-guard untrust NAME" >&2; exit 2; }
+    need_root
+    if [ "$DRYRUN" = 1 ]; then
+        echo "  would remove '$name' from $TRUST_FILE" >&2
+    elif [ -e "$TRUST_FILE" ]; then
+        grep -vxF "$name" "$TRUST_FILE" >"$TRUST_FILE.tmp" || true
+        mv "$TRUST_FILE.tmp" "$TRUST_FILE"; chmod 0644 "$TRUST_FILE"
+    fi
+    run nmcli connection modify "$name" connection.zone "" \
+        ipv4.dhcp-send-hostname default ipv6.dhcp-send-hostname default
+    local n; for n in "${TRUSTED_CONNS[@]}"; do [ "$n" = "$name" ] || keep+=("$n"); done
+    TRUSTED_CONNS=("${keep[@]}")
+    info=$(active_conn)
+    if [ "${info%%:*}" = "$name" ]; then
+        dev=$(echo "$info" | cut -d: -f2); ctype=$(echo "$info" | cut -d: -f3)
+        run firewall-cmd --zone="$AWAY_ZONE" --change-interface="$dev"
+        apply "$dev" "$name" "$ctype"
+    fi
+    change "no longer trusted: $name"
+}
+
+# ------------------------------------------------------------------- status ---
+status() {
+    local conn dev ctype
+    echo "roam-guard status"
+    echo "  installed        : $([ -x "$HOOK" ] && echo yes || echo no) (hook $HOOK)"
+    echo "  default zone     : $(firewall-cmd --get-default-zone 2>/dev/null || echo '?')"
+    echo "  trusted networks : ${TRUSTED_CONNS[*]:-none} ($([ -r "$TRUST_FILE" ] && echo "$TRUST_FILE" || echo 'built-in default; install to manage'))"
+    while IFS=: read -r conn dev ctype; do
+        case "$ctype" in 802-11-wireless|802-3-ethernet) ;; *) continue ;; esac
+        echo "  $dev: $conn ($(is_trusted "$conn" && echo trusted || echo untrusted))"
+        echo "    firewall zone  : $(firewall-cmd --get-zone-of-interface="$dev" 2>/dev/null || echo '?')"
+        echo "    MAC            : $(cat "/sys/class/net/$dev/address") (hardware $(ethtool -P "$dev" 2>/dev/null | awk '{print $3}'))"
+        echo "    IPv6 privacy   : use_tempaddr=$(sysctl -n "net.ipv6.conf.$dev.use_tempaddr" 2>/dev/null)"
+        echo "    DHCP hostname  : $(case "$(nmcli -g ipv4.dhcp-send-hostname connection show "$conn" 2>/dev/null)" in yes|1) echo sent;; no|0) echo withheld;; *) grep -q 'ipv4.dhcp-send-hostname=0' "$NM_CONF" 2>/dev/null && echo withheld || echo "sent (roam-guard not installed)";; esac)"
+        echo "    name lookups   : $(resolvectl status "$dev" 2>/dev/null | awk -F': ' '/Protocols/{print $2}')"
+        if [ "$ctype" = 802-11-wireless ]; then
+            echo "    link           : $(iw dev "$dev" link 2>/dev/null | awk '/freq/{f=$2} /signal/{s=$2" "$3} /tx bitrate/{t=$3" "$4} END{print f" MHz, "s", tx "t}')"
+            echo "    power saving   : $(iw dev "$dev" get power_save 2>/dev/null | awk '{print $3}') ($(on_battery && echo battery || echo mains))"
+            echo "    regulatory     : $(iw reg get 2>/dev/null | awk '/^global/{g=1; next} g && /^country/{sub(":","",$2); print $2; exit}') (APs advertise: $(beacon_country "$dev"))"
+        fi
+    done < <(nmcli -t -f NAME,DEVICE,TYPE connection show --active)
+    echo "  time sources     : $(grep -c ' nts' "$CHRONY_DIR/nts.sources" 2>/dev/null || echo 0) NTS; DHCP NTP files: $(find /run/chrony-dhcp -name "*.sources" 2>/dev/null | wc -l)"
+    echo "  open + auto-join : $(nmcli -t -f NAME,TYPE,AUTOCONNECT connection show | while IFS=: read -r n t a; do [ "$t" = 802-11-wireless ] && [ "$a" = yes ] && is_open "$n" && echo x; done | wc -l) saved open networks (0 once installed)"
+    echo "  avahi            : $(systemctl is-active avahi-daemon 2>/dev/null) (socket $(systemctl is-enabled avahi-daemon.socket 2>/dev/null))"
+    echo "  LLMNR listeners  : $(ss -ulnH 'sport = :5355' 2>/dev/null | wc -l) (0 once installed)"
+}
+
+case "${1:-install}" in
+    install) shift || true; install_all "$@" ;;
+    hook)    shift; hook "$@" ;;
+    status)  status ;;
+    trust)   shift; trust "$@" ;;
+    untrust) shift; untrust "$@" ;;
+    trusted) printf '%s\n' "${TRUSTED_CONNS[@]}" ;;
+    log)     journalctl -t roam-guard --grep 'CHANGE:' --no-pager -n "${2:-30}" -o short ;;
+    undo)    shift; undo "$@" ;;
+    -h|--help) sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) echo "usage: roam-guard [install|status|log [N]|trust [NAME]|untrust NAME|trusted|undo|--help]" >&2; exit 2 ;;
+esac
+ROAM_GUARD_EOF
+    chmod 0755 "$HOME/.local/bin/roam-guard"
+    # The installer re-runs itself under sudo, copies itself to a root-owned
+    # /usr/local/sbin/roam-guard and adds the NetworkManager hook.
+    "$HOME/.local/bin/roam-guard" install
+    # Trusted networks (home): get the home firewall zone, avahi, and the
+    # hostname in DHCP. Everything else is treated as untrusted.
+    if [ -t 0 ]; then
+      current=$(nmcli -t -f NAME,TYPE connection show --active 2>/dev/null | awk -F: '$2=="802-11-wireless"{print $1; exit}')
+      if [ -n "$current" ]; then
+        read -rp "Trust the network you're on now ('$current') as home? [y/N] " rg_trust
+        case "${rg_trust,,}" in
+          y|yes) "$HOME/.local/bin/roam-guard" trust "$current" ;;
+        esac
+      fi
+      echo "Trust other saved networks later with:  roam-guard trust \"Network name\""
+    fi
+    ;;
+  *)
+    echo "roam-guard not installed."
+    ;;
+esac
+
+#
 # Fingerprint authentication — detect a fingerprint scanner, install fprintd,
 # enable the PAM module via authselect, and walk the user through enrollment.
 #
@@ -1457,6 +1965,10 @@ echo "PKI:     Federal/USDA and DoD CA bundles imported to ~/.pki/nssdb (no card
 echo "         needed) and self-checked above. On PATH for any host/user:"
 echo "         verify-pki-trust.sh (fleet PASS/FAIL) and piv-card-recon.sh (deep"
 echo "         diagnostics with the card inserted)."
+if [ -x /usr/local/sbin/roam-guard ]; then
+  echo "Wi-Fi:   roam-guard protects every network you join; trusted: $(roam-guard trusted 2>/dev/null | paste -sd, - || echo none)."
+  echo "         roam-guard status | trust \"Name\" | log   (every change is also a notification)"
+fi
 if fprintd-list "$USER" 2>/dev/null | grep -qE '^\s+-\s+#[0-9]+:'; then
   echo "Fingerprint: enrolled and active for login, sudo, and screen unlock."
   echo "             Re-enroll / add fingers with:  fprintd-enroll"
