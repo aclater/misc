@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# vm-run: rate-limited launcher for test VMs (qemu-system-*).
+#
+#   vm-run [--name N] qemu-system-x86_64 ... -smp 2 -m 2048 ...
+#
+# Two limits, so parallel test matrices can't bury the host:
+#  1. Admission: a VM starts only when its vCPUs fit in VM_VCPU_BUDGET
+#     alongside the other vm-run VMs; otherwise it waits.
+#  2. Ceiling: every VM runs in the user slice pqc-vms.slice, capped at
+#     VM_CPU_QUOTA and VM_MEM_MAX, with a low CPU weight so the desktop and
+#     CRC/OpenShift always win.
+# Defaults: 12 vCPUs / 1200% / 28G while the `crc` VM runs, 18 / 1800% / 44G
+# when it's stopped (tuned for a 24-core, 62G host; override with the env vars).
+# The slice file (~/.config/systemd/user/pqc-vms.slice) is generated, not shipped.
+# Works with -daemonize (the scope lives as long as the qemu process).
+#
+#   vm-run --status     show reservations and slice usage
+set -euo pipefail
+
+# CRC/OpenShift Local holds 8 vCPUs and 24G outside this budget; when it's
+# stopped, test VMs get that headroom back (24 cores, 62G host).
+if virsh -c qemu:///system domstate crc 2>/dev/null | grep -q running; then
+  DEF_BUDGET=12 DEF_QUOTA=1200% DEF_MEM=28G
+else
+  DEF_BUDGET=18 DEF_QUOTA=1800% DEF_MEM=44G
+fi
+BUDGET=${VM_VCPU_BUDGET:-$DEF_BUDGET}
+QUOTA=${VM_CPU_QUOTA:-$DEF_QUOTA}
+MEMMAX=${VM_MEM_MAX:-$DEF_MEM}
+WAIT_MAX=${VM_WAIT_MAX:-3600}   # seconds to wait for budget before failing
+STATE=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/vm-run
+SLICE=pqc-vms.slice
+mkdir -p "$STATE"
+
+ensure_slice() {
+  local d=~/.config/systemd/user f=~/.config/systemd/user/$SLICE
+  local want="[Slice]
+CPUQuota=$QUOTA
+CPUWeight=30
+MemoryMax=$MEMMAX
+TasksMax=4096"
+  if [ "$(cat "$f" 2>/dev/null)" != "$want" ]; then
+    mkdir -p "$d"; printf '%s\n' "$want" >"$f"
+    systemctl --user daemon-reload
+  fi
+}
+
+# Drop reservations whose scope is gone; print vCPUs in use.
+used_vcpus() {
+  local total=0 r unit n
+  for r in "$STATE"/*.res; do
+    [ -e "$r" ] || continue
+    read -r unit n <"$r"
+    if [ -n "$unit" ] && systemctl --user is-active -q "$unit" 2>/dev/null; then
+      total=$((total + n))
+    elif [ "$(( $(date +%s) - $(stat -c %Y "$r") ))" -gt 30 ]; then
+      rm -f "$r"   # grace period covers scopes that are still starting
+    fi
+  done
+  echo "$total"
+}
+
+if [ "${1:-}" = "--status" ]; then
+  echo "vCPU in use: $(used_vcpus) / $BUDGET"
+  for r in "$STATE"/*.res; do [ -e "$r" ] && cat "$r"; done
+  systemctl --user status "$SLICE" --no-pager 2>/dev/null | sed -n '1,8p' || true
+  exit 0
+fi
+
+name=vm
+if [ "${1:-}" = "--name" ]; then name=$2; shift 2; fi
+[ $# -gt 0 ] || { echo "usage: vm-run [--name N] qemu-system-... args" >&2; exit 2; }
+
+# vCPUs requested: -smp N or -smp cpus=N (qemu default 1).
+vcpus=1 prev=
+for a in "$@"; do
+  if [ "$prev" = "-smp" ]; then
+    v=${a%%,*}; v=${v#cpus=}; [[ $v =~ ^[0-9]+$ ]] && vcpus=$v
+  fi
+  prev=$a
+done
+if [ "$vcpus" -gt "$BUDGET" ]; then
+  echo "vm-run: $name wants $vcpus vCPUs, budget is $BUDGET" >&2; exit 1
+fi
+
+ensure_slice
+unit="vm-$(printf %s "$name" | tr -c 'A-Za-z0-9_.-' '_')-$$-$RANDOM.scope"
+res="$STATE/$unit.res"
+start=$(date +%s) said=
+while :; do
+  exec 9>"$STATE/lock"; flock 9
+  used=$(used_vcpus)
+  if [ $((used + vcpus)) -le "$BUDGET" ]; then
+    echo "$unit $vcpus" >"$res"; flock -u 9; break
+  fi
+  flock -u 9
+  [ -n "$said" ] || { echo "vm-run: $name waiting for $vcpus vCPUs ($used/$BUDGET in use)" >&2; said=1; }
+  if [ $(( $(date +%s) - start )) -ge "$WAIT_MAX" ]; then
+    echo "vm-run: $name gave up after ${WAIT_MAX}s" >&2; exit 1
+  fi
+  sleep 5
+done
+
+trap 'rm -f "$res"' ERR
+systemd-run --user --scope --quiet --collect --slice="$SLICE" --unit="$unit" \
+  -p CPUWeight=30 nice -n 10 "$@"

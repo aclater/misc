@@ -1,0 +1,92 @@
+#!/bin/bash
+# Sync locally downloaded cloud qcow2s into saturn's ISO cache, in the
+# distro-matrix layout: <image-root>/<distro-dir>/<dated upstream filename>.
+#
+# Source of truth: ~/.cache/pqc-vm-matrix/manifest.tsv
+#   alias <TAB> distro-dir <TAB> dated-filename <TAB> sha256 <TAB> source-url
+#
+# Safe to run any time (systemd user timer runs it hourly):
+#   - exits quietly when saturn is not reachable (i.e. not at home)
+#   - refuses to sync unless the target root already looks like the ISO
+#     cache (has rocky/ and fedora/), so a wrong path never sprays files
+#   - never overwrites an existing file (--ignore-existing), then verifies
+#     every manifest entry's sha256 on saturn before marking it filed
+#
+# Configuration (no built-in defaults for where the image store lives):
+#   ~/.config/sync-vm-images-saturn/config, sourced as shell, or the same
+#   variables in the environment:
+#     SATURN_HOST=nas.example.lan      # SSH host of the image store (required)
+#     SATURN_ROOT=/srv/iso/linux       # image-root on that host (required)
+#     SATURN_USER=me                   # optional, default $USER
+#   Unconfigured, it logs and exits 0 so the timer stays quiet.
+set -euo pipefail
+
+CACHE=${PQC_VM_CACHE:-$HOME/.cache/pqc-vm-matrix}
+MANIFEST=$CACHE/manifest.tsv
+STAGE=$CACHE/linux
+STATE=$CACHE/filed-on-saturn.txt
+CONF=${SYNC_VM_IMAGES_CONF:-$HOME/.config/sync-vm-images-saturn/config}
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
+HOST=${SATURN_HOST:-}
+USERNAME=${SATURN_USER:-$USER}
+ROOT=${SATURN_ROOT:-}
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5 "$USERNAME@$HOST")
+
+log() { printf '%s %s\n' "$(date -Is)" "$*"; }
+
+if [ -z "$HOST" ] || [ -z "$ROOT" ]; then
+  log "not configured: set SATURN_HOST and SATURN_ROOT in $CONF"; exit 0
+fi
+
+[ -s "$MANIFEST" ] || { log "no manifest at $MANIFEST; nothing to do"; exit 0; }
+touch "$STATE"
+
+pending=$(awk -F'\t' '!/^#/ && NF>=4 {print $2"/"$3}' "$MANIFEST" | grep -vxF -f "$STATE" || true)
+[ -n "$pending" ] || { log "all manifest images already filed on $HOST"; exit 0; }
+
+# Not home (or saturn down): exit quietly so the timer can retry later.
+if ! timeout 5 bash -c "</dev/tcp/$HOST/22" 2>/dev/null; then
+  log "$HOST:22 not reachable; will retry later"
+  exit 0
+fi
+
+# Guard: the target must already be the ISO cache tree.
+if ! "${SSH[@]}" "test -d '$ROOT/rocky' && test -d '$ROOT/fedora' && test -w '$ROOT'"; then
+  log "ERROR: $USERNAME@$HOST:$ROOT does not look like the ISO cache (needs writable rocky/ + fedora/); refusing to sync"
+  exit 1
+fi
+
+# Stage hardlinks under dated names (no extra disk use).
+while IFS=$'\t' read -r alias dir file sha _; do
+  [[ -z "$alias" || "$alias" == \#* ]] && continue
+  src=$CACHE/images/$alias.qcow2
+  [ -f "$src" ] || { log "missing $src (alias $alias); skipping"; continue; }
+  mkdir -p "$STAGE/$dir"
+  [ -e "$STAGE/$dir/$file" ] || ln "$src" "$STAGE/$dir/$file"
+  grep -qF "  $file" "$STAGE/$dir/SHA256SUMS.pqc-vm-matrix" 2>/dev/null \
+    || printf '%s  %s\n' "$sha" "$file" >> "$STAGE/$dir/SHA256SUMS.pqc-vm-matrix"
+done < "$MANIFEST"
+
+log "syncing to $USERNAME@$HOST:$ROOT"
+rsync -rt --ignore-existing --partial --info=progress2 -e "ssh -o BatchMode=yes" \
+  "$STAGE/" "$USERNAME@$HOST:$ROOT/"
+
+# Verify on saturn and record what is filed.
+filed=0
+while IFS=$'\t' read -r alias dir file sha _; do
+  [[ -z "$alias" || "$alias" == \#* ]] && continue
+  rel="$dir/$file"
+  grep -qxF "$rel" "$STATE" && continue
+  remote=$("${SSH[@]}" "sha256sum '$ROOT/$rel' 2>/dev/null | cut -c1-64" || true)
+  if [ "$remote" = "$sha" ]; then
+    echo "$rel" >> "$STATE"; filed=$((filed + 1)); log "filed $rel"
+  else
+    log "ERROR: checksum mismatch or missing on $HOST for $rel (got '${remote:-none}')"
+  fi
+done < "$MANIFEST"
+
+log "filed $filed new image(s) on $HOST"
+if [ "$filed" -gt 0 ] && command -v notify-send >/dev/null; then
+  notify-send "VM images filed on $HOST" "$filed image(s) copied to $ROOT and verified" || true
+fi

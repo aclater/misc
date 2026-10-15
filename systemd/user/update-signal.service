@@ -1,0 +1,6 @@
+[Unit]
+Description=Update Signal Desktop AppImage
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/update-signal-appimage.sh
