@@ -31,7 +31,7 @@ CONF=${SYNC_VM_IMAGES_CONF:-$HOME/.config/sync-vm-images-saturn/config}
 HOST=${SATURN_HOST:-}
 USERNAME=${SATURN_USER:-$USER}
 ROOT=${SATURN_ROOT:-}
-SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5 "$USERNAME@$HOST")
+SSH=(ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$USERNAME@$HOST")
 
 log() { printf '%s %s\n' "$(date -Is)" "$*"; }
 
