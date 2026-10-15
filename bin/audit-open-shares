@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+#
+# audit-open-shares.sh — Home-network self-audit: find what your own hosts
+# expose, so you know what to lock down.
+#
+# Checks, all passive/unauthenticated (it NEVER supplies or guesses credentials,
+# and never reads file contents):
+#   1. SMB / NFS shares reachable without a password
+#   2. Other anonymous file protocols: FTP, TFTP, rsync, AFP, WebDAV
+#   3. Unauthenticated databases bound to the network (Redis, Mongo, ES, SQL)
+#   4. Remote-access & legacy services present (Telnet, RDP, VNC, SSH, SMBv1)
+#   5. Admin web panels (presence only — it does not log in)
+#   6. UPnP/IGD port mappings your router forwards to the INTERNET
+#   7. A device inventory (IP · MAC · vendor) as a lock-down baseline
+#
+# Intended for a network you own/administer.
+# Requires: smbclient, showmount. Strongly recommended: nmap. Optional: curl, nc, rsync.
+#
+set -uo pipefail
+
+# ---- config -----------------------------------------------------------------
+TIMEOUT="${TIMEOUT:-4}"
+SUBNET="${1:-auto}"
+PING_PARALLEL="${PING_PARALLEL:-64}"
+REPORT="${REPORT:-}"           # set REPORT=audit.txt to also save a plain-text copy
+
+C_RED=$'\e[31m'; C_YEL=$'\e[33m'; C_GRN=$'\e[32m'; C_CYN=$'\e[36m'; C_DIM=$'\e[2m'; C_B=$'\e[1m'; C_0=$'\e[0m'
+[ -t 1 ] || { C_RED=; C_YEL=; C_GRN=; C_CYN=; C_DIM=; C_B=; C_0=; }
+
+HAVE_NMAP=0; command -v nmap   >/dev/null 2>&1 && HAVE_NMAP=1
+HAVE_CURL=0; command -v curl   >/dev/null 2>&1 && HAVE_CURL=1
+HAVE_NC=0;   command -v nc     >/dev/null 2>&1 && HAVE_NC=1
+HAVE_RSYNC=0;command -v rsync  >/dev/null 2>&1 && HAVE_RSYNC=1
+
+# print to screen and (if enabled) to the report file
+say() { printf '%s\n' "$1"; [ -n "$REPORT" ] && printf '%s\n' "$1" | sed 's/\x1b\[[0-9;]*m//g' >>"$REPORT"; }
+[ -n "$REPORT" ] && : >"$REPORT"
+
+# ---- subnet -----------------------------------------------------------------
+detect_cidr() { ip -o -f inet addr show scope global | awk '{print $4}' | head -n1; }
+if [ "$SUBNET" = "auto" ]; then
+    CIDR="$(detect_cidr)"; [ -z "$CIDR" ] && { echo "No subnet detected; pass one, e.g. 192.168.1.0/24" >&2; exit 1; }
+else CIDR="$SUBNET"; fi
+myip="$(detect_cidr | cut -d/ -f1)"
+gw="$(ip route | awk '/^default/{print $3; exit}')"
+
+say "${C_B}=== Home network audit — $CIDR ===${C_0}"
+say "${C_DIM}this host: $myip · gateway: ${gw:-unknown} · $(date)${C_0}"
+[ "$HAVE_NMAP" -eq 0 ] && say "${C_YEL}note: nmap not found — port/db/service checks limited. Install: sudo dnf install nmap${C_0}"
+say ""
+
+# ---- host discovery ---------------------------------------------------------
+hosts_file="$(mktemp)"; trap 'rm -f "$hosts_file" "$hosts_file".*' EXIT
+prefix="${CIDR#*/}"; net3="${CIDR%.*/*}"; net3="${net3%.*}.${CIDR#*.}"; net3="${CIDR%.*}"
+
+if [ "$HAVE_NMAP" -eq 1 ]; then
+    nmap -n -sn "$CIDR" 2>/dev/null | awk '/report for/{print $NF}' | tr -d '()' >"$hosts_file"
+elif [ "${prefix:-24}" -ge 24 ]; then
+    seq 1 254 | xargs -P "$PING_PARALLEL" -I{} bash -c \
+        "ping -c1 -W1 ${net3}.{} >/dev/null 2>&1 && echo ${net3}.{}" >"$hosts_file"
+else
+    say "${C_DIM}Large subnet and no nmap — using ARP + mDNS neighbors only.${C_0}"
+    ip neigh | awk '/REACHABLE|STALE|DELAY/{print $1}' >"$hosts_file"
+    command -v avahi-browse >/dev/null 2>&1 && \
+        timeout 6 avahi-browse -a -t -r -p 2>/dev/null | awk -F';' '/^=/{print $8}' >>"$hosts_file"
+fi
+grep -E '^[0-9.]+$' "$hosts_file" | sort -u -t. -k1,1n -k2,2n -k3,3n -k4,4n >"$hosts_file.s"; mv "$hosts_file.s" "$hosts_file"
+say "Discovered $(wc -l <"$hosts_file") live host(s)."
+say ""
+
+# ---- helpers ----------------------------------------------------------------
+# TCP port open? nmap if available (one scan per host, cached), else nc.
+declare -A OPEN_CACHE
+scan_ports() {   # $1=ip  -> caches "p1 p2 ..." open ports in OPEN_CACHE[ip]
+    local ip="$1"
+    [ -n "${OPEN_CACHE[$ip]+x}" ] && return
+    local ports="21,22,23,139,445,548,631,873,1900,2049,3389,5900,5901,6379,8080,8443,9200,11211,27017,3306,5432"
+    if [ "$HAVE_NMAP" -eq 1 ]; then
+        OPEN_CACHE[$ip]="$(nmap -n -Pn -T4 --host-timeout 20s -p "$ports" "$ip" 2>/dev/null \
+            | awk -F/ '/^[0-9]+\/tcp[[:space:]]+open/{print $1}' | tr '\n' ' ')"
+    elif [ "$HAVE_NC" -eq 1 ]; then
+        local open=""
+        for p in ${ports//,/ }; do nc -z -w1 "$ip" "$p" >/dev/null 2>&1 && open="$open $p"; done
+        OPEN_CACHE[$ip]="$open"
+    else OPEN_CACHE[$ip]=""; fi
+}
+port_open() { case " ${OPEN_CACHE[$1]} " in *" $2 "*) return 0;; *) return 1;; esac; }
+
+vendor_of() {    # $1=ip -> MAC vendor via nmap, else blank
+    [ "$HAVE_NMAP" -eq 1 ] || { echo ""; return; }
+    nmap -n -sn "$1" 2>/dev/null | awk -F'[()]' '/MAC Address/{print $2}' | head -n1
+}
+
+found_any=0
+
+# ---- per-host checks --------------------------------------------------------
+# fd 3 so smbclient/nmap inside the loop can't consume the host list
+while IFS= read -r ip <&3; do
+    scan_ports "$ip"
+    host_lines=""
+    add() { host_lines="${host_lines}${1}
+"; found_any=1; }
+
+    # --- SMB shares (anonymous) ---
+    if port_open "$ip" 445 || port_open "$ip" 139; then
+        smb="$(timeout "$TIMEOUT" smbclient -N -g -L "//$ip" 2>/dev/null | awk -F'|' '/^Disk\|/{print $2}' | grep -v '\$$')"
+        while IFS= read -r s; do [ -z "$s" ] && continue
+            if timeout "$TIMEOUT" smbclient -N "//$ip/$s" -c 'ls' >/dev/null 2>&1; then
+                add "    ${C_RED}[SMB OPEN]${C_0}  $s   ${C_DIM}← anonymous read works${C_0}"
+            else
+                add "    ${C_YEL}[SMB share]${C_0} $s   ${C_DIM}← visible, login required${C_0}"
+            fi
+        done <<<"$smb"
+        # SMBv1 detection (legacy, should be off)
+        if [ "$HAVE_NMAP" -eq 1 ] && nmap -n -Pn -p445 --script smb-protocols "$ip" 2>/dev/null | grep -qi 'SMBv1\|NT LM 0.12'; then
+            add "    ${C_RED}[SMBv1]${C_0}     legacy SMBv1 enabled — disable it"
+        fi
+    fi
+
+    # --- NFS exports ---
+    if port_open "$ip" 2049; then
+        nfs="$(timeout "$TIMEOUT" showmount -e "$ip" 2>/dev/null | tail -n +2)"
+        [ -n "$nfs" ] && while IFS= read -r l; do add "    ${C_YEL}[NFS export]${C_0} $l"; done <<<"$nfs"
+    fi
+
+    # --- other anonymous file protocols ---
+    if port_open "$ip" 21; then
+        if [ "$HAVE_NMAP" -eq 1 ] && nmap -n -Pn -p21 --script ftp-anon "$ip" 2>/dev/null | grep -qi 'Anonymous FTP login allowed'; then
+            add "    ${C_RED}[FTP ANON]${C_0}  anonymous FTP login allowed"
+        else
+            add "    ${C_YEL}[FTP]${C_0}       FTP service present"
+        fi
+    fi
+    port_open "$ip" 548 && add "    ${C_YEL}[AFP]${C_0}       Apple file sharing present (legacy)"
+    if port_open "$ip" 873; then
+        mods=""; [ "$HAVE_RSYNC" -eq 1 ] && mods="$(timeout "$TIMEOUT" rsync "rsync://$ip/" 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+        add "    ${C_RED}[rsync]${C_0}     rsync daemon present${mods:+ — modules: $mods}"
+    fi
+
+    # --- unauthenticated databases / caches bound to the network ---
+    db_check() { # port name probe-grep
+        local p="$1" name="$2"
+        port_open "$ip" "$p" || return
+        if [ "$HAVE_NMAP" -eq 1 ]; then
+            case "$p" in
+              6379) if nmap -n -Pn -p6379 --script redis-info "$ip" 2>/dev/null | grep -qi 'redis_version'; then
+                        add "    ${C_RED}[Redis NOAUTH]${C_0} Redis answering with no password"
+                    else add "    ${C_YEL}[Redis]${C_0}       Redis port open"; fi;;
+              27017) if nmap -n -Pn -p27017 --script mongodb-info "$ip" 2>/dev/null | grep -qi 'MongoDB'; then
+                        add "    ${C_RED}[MongoDB]${C_0}    MongoDB answering unauthenticated"
+                    else add "    ${C_YEL}[MongoDB]${C_0}    MongoDB port open"; fi;;
+              9200) if [ "$HAVE_CURL" -eq 1 ] && timeout "$TIMEOUT" curl -s "http://$ip:9200/" 2>/dev/null | grep -qi 'cluster_name'; then
+                        add "    ${C_RED}[Elasticsearch]${C_0} responding with no auth"
+                    else add "    ${C_YEL}[Elasticsearch]${C_0} port 9200 open"; fi;;
+              11211) add "    ${C_YEL}[memcached]${C_0}  port 11211 open (often unauthenticated)";;
+              3306) add "    ${C_YEL}[MySQL]${C_0}      MySQL/MariaDB reachable on the network";;
+              5432) add "    ${C_YEL}[Postgres]${C_0}   PostgreSQL reachable on the network";;
+            esac
+        else
+            add "    ${C_YEL}[$name]${C_0} port $p open"
+        fi
+    }
+    db_check 6379 Redis; db_check 27017 MongoDB; db_check 9200 Elasticsearch
+    db_check 11211 memcached; db_check 3306 MySQL; db_check 5432 Postgres
+
+    # --- remote-access & legacy services (presence only) ---
+    port_open "$ip" 23   && add "    ${C_RED}[Telnet]${C_0}    cleartext Telnet open — disable"
+    port_open "$ip" 3389 && add "    ${C_YEL}[RDP]${C_0}       Windows Remote Desktop open"
+    port_open "$ip" 5900 && add "    ${C_YEL}[VNC]${C_0}       VNC / Screen Sharing open"
+    port_open "$ip" 5901 && add "    ${C_YEL}[VNC]${C_0}       VNC (:1) open"
+
+    # --- admin web panels (presence only; no login attempted) ---
+    for p in 80 443 631 8080 8443; do
+        port_open "$ip" "$p" || continue
+        [ "$HAVE_CURL" -eq 1 ] || { continue; }
+        proto=http; case "$p" in 443|8443) proto=https;; esac
+        title="$(timeout "$TIMEOUT" curl -sk -m "$TIMEOUT" "$proto://$ip:$p/" 2>/dev/null \
+                 | grep -oiE '<title>[^<]*' | head -n1 | sed 's/<title>//i')"
+        # shellcheck disable=SC1111  # typographic quotes are report output
+        [ -n "$title" ] && add "    ${C_CYN}[web panel]${C_0} $proto://$ip:$p/  ${C_DIM}“$(echo "$title" | tr -s ' ' | cut -c1-50)”${C_0}"
+    done
+
+    if [ -n "$host_lines" ]; then
+        v="$(vendor_of "$ip")"; [ "$ip" = "$myip" ] && v="${v:+$v }(this machine)"
+        say "${C_B}● $ip${C_0}${v:+  ${C_DIM}$v${C_0}}"
+        printf '%s' "$host_lines" | sed '/^$/d' | while IFS= read -r l; do say "$l"; done
+        say ""
+    fi
+done 3<"$hosts_file"
+
+# ---- router / internet exposure (UPnP IGD port mappings) --------------------
+say "${C_B}--- Internet exposure (UPnP port forwards on router) ---${C_0}"
+upnp_report() {
+    [ "$HAVE_CURL" -eq 1 ] || { say "${C_DIM}(curl not installed — skipping UPnP check)${C_0}"; return; }
+    # Discover the IGD control URL via SSDP
+    local resp loc
+    resp="$(timeout 3 bash -c 'exec 3<>/dev/udp/239.255.255.250/1900
+        printf "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: urn:schemas-upnp-org:service:WANIPConnection:1\r\n\r\n" >&3
+        timeout 2 cat <&3' 2>/dev/null)"
+    loc="$(echo "$resp" | grep -i '^location:' | head -n1 | awk '{print $2}' | tr -d "\r")"
+    if [ -z "$loc" ]; then say "${C_GRN}✓ No UPnP IGD responded (router may have UPnP disabled — good).${C_0}"; return; fi
+    local base ctrl; base="$(echo "$loc" | sed -E 's#(https?://[^/]+).*#\1#')"
+    ctrl="$(timeout "$TIMEOUT" curl -s "$loc" 2>/dev/null | grep -oiE '<controlURL>[^<]*' | head -n1 | sed 's/<controlURL>//i')"
+    [ -z "$ctrl" ] && { say "${C_YEL}UPnP device at $loc but control URL not parsed; check router UI.${C_0}"; return; }
+    case "$ctrl" in http*) ;; /*) ctrl="$base$ctrl";; *) ctrl="$base/$ctrl";; esac
+    say "${C_DIM}Querying router IGD at $ctrl${C_0}"
+    local i=0 any=0
+    while [ "$i" -lt 50 ]; do
+        local body out
+        body="<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:GetGenericPortMappingEntry xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\"><NewPortMappingIndex>$i</NewPortMappingIndex></u:GetGenericPortMappingEntry></s:Body></s:Envelope>"
+        out="$(timeout "$TIMEOUT" curl -s -H 'Content-Type: text/xml' \
+            -H 'SOAPAction: "urn:schemas-upnp-org:service:WANIPConnection:1#GetGenericPortMappingEntry"' \
+            -d "$body" "$ctrl" 2>/dev/null)"
+        echo "$out" | grep -qi 'SpecifiedArrayIndexInvalid\|<faultstring' && break
+        echo "$out" | grep -qi 'NewExternalPort' || break
+        local ep ip2 inport proto desc
+        ep="$(echo "$out"    | grep -oiE '<NewExternalPort>[^<]*'  | sed 's/.*>//')"
+        ip2="$(echo "$out"   | grep -oiE '<NewInternalClient>[^<]*'| sed 's/.*>//')"
+        inport="$(echo "$out"| grep -oiE '<NewInternalPort>[^<]*'  | sed 's/.*>//')"
+        proto="$(echo "$out" | grep -oiE '<NewProtocol>[^<]*'      | sed 's/.*>//')"
+        desc="$(echo "$out"  | grep -oiE '<NewPortMappingDescription>[^<]*' | sed 's/.*>//')"
+        # shellcheck disable=SC1111  # typographic quotes are report output
+        say "    ${C_RED}[FORWARDED]${C_0} WAN:$ep/$proto → $ip2:$inport  ${C_DIM}“$desc”${C_0}"
+        any=1; found_any=1; i=$((i+1))
+    done
+    [ "$any" -eq 0 ] && say "${C_GRN}✓ UPnP present but no active port mappings.${C_0}"
+}
+upnp_report
+say ""
+
+# ---- summary ----------------------------------------------------------------
+if [ "$found_any" -eq 0 ]; then
+    say "${C_GRN}✓ Nothing exposed anonymously and no risky services found.${C_0}"
+else
+    say "${C_B}Lock-down guide:${C_0}"
+    say "  ${C_RED}[*OPEN/NOAUTH/ANON]${C_0} = reachable with no password — fix these first."
+    say "  • SMB/NFS/FTP: require auth; macOS Sharing → specific users; smb.conf 'guest ok = no'."
+    say "  • Databases: bind to 127.0.0.1 (or set a password + firewall) — never 0.0.0.0 at home."
+    say "  • Telnet/SMBv1: disable entirely; use SSH / SMBv3."
+    say "  • ${C_RED}[FORWARDED]${C_0} UPnP holes: open your router UI, delete mappings you don't recognize,"
+    say "    and consider turning UPnP off — it's the most common accidental internet exposure."
+    say "  • Then verify from OUTSIDE: scan your public IP from a phone on cellular / a VPS,"
+    say "    since this scan runs inside NAT and can't see the real internet-facing surface."
+fi
+[ -n "$REPORT" ] && say "${C_DIM}(report saved to $REPORT)${C_0}"

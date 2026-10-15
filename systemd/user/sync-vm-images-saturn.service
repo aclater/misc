@@ -1,0 +1,9 @@
+[Unit]
+Description=File locally cached VM cloud images into saturn's ISO cache
+Documentation=file://%h/.local/bin/sync-vm-images-saturn
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/sync-vm-images-saturn
+Nice=10
+IOSchedulingClass=idle

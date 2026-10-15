@@ -1,0 +1,129 @@
+#!/bin/bash
+# pqc-rancher-lab: rootless Rancher + RKE2 lab for pqc-readiness (#219).
+#
+# Three persistent qemu-kvm VMs, no libvirt, no root:
+#   rancher  Ubuntu 26.04  4 vCPU / 8 GiB   Rancher management cluster (RKE2)
+#   ds-rocky Rocky 10      2 vCPU / 6 GiB   downstream RKE2 node (etcd, control plane, worker)
+#   ds-leap  Leap 16.0     2 vCPU / 4 GiB   downstream RKE2 node (worker)
+# NIC 1: user-mode networking (internet + host port forwards).
+# NIC 2: a shared L2 segment over UDP multicast on loopback, 10.77.0.0/24.
+#
+# Usage: pqc-rancher-lab start|stop|status|ssh <vm> [cmd...]|console <vm>
+# Host access: Rancher UI https://localhost:8443  (see ACCESS.md)
+#              management cluster API https://127.0.0.1:16443
+set -u
+LAB=${PQC_RANCHER_LAB:-$HOME/.cache/pqc-vm-matrix/rancher}
+IMAGES=$HOME/.cache/pqc-vm-matrix/images
+MCAST=230.77.0.1:47700
+
+# name image cpus mem_mib lab_ip ssh_port extra_hostfwd
+VMS=(
+  "rancher ubuntu2604 4 8192 10.77.0.10 2310 hostfwd=tcp:127.0.0.1:8443-:443,hostfwd=tcp:127.0.0.1:16443-:6443"
+  "ds-rocky rocky10 2 6144 10.77.0.11 2311 "
+  "ds-leap leap16 2 4096 10.77.0.12 2312 "
+)
+
+field() { echo "$1" | awk -v n="$2" '{print $n}'; }
+vm_line() { for v in "${VMS[@]}"; do [ "$(field "$v" 1)" = "$1" ] && { echo "$v"; return; }; done; return 1; }
+mac() { printf '52:54:00:77:%02x:%02x' "$1" "$2"; }
+
+seed() {  # seed <name> <ip> <idx>
+  local n=$1 ip=$2 i=$3 d=$LAB/$1/seed
+  mkdir -p "$d"
+  cat > "$d/meta-data" <<EOF
+instance-id: pqc-rancher-$n
+local-hostname: $n
+EOF
+  cat > "$d/network-config" <<EOF
+version: 2
+ethernets:
+  wan:
+    match: {macaddress: "$(mac 1 "$i")"}
+    set-name: wan0
+    dhcp4: true
+  lab:
+    match: {macaddress: "$(mac 2 "$i")"}
+    set-name: lab0
+    addresses: [$ip/24]
+EOF
+  cat > "$d/user-data" <<EOF
+#cloud-config
+hostname: $n
+users:
+  - name: lab
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys: [$(cat "$LAB/id_ed25519.pub")]
+write_files:
+  - path: /etc/hosts
+    append: true
+    content: |
+      10.77.0.10 rancher rancher.lab
+      10.77.0.11 ds-rocky
+      10.77.0.12 ds-leap
+  - path: /etc/modules-load.d/rke2.conf
+    content: |
+      overlay
+      br_netfilter
+      xt_conntrack
+      xt_comment
+runcmd:
+  - [sh, -c, "systemctl disable --now firewalld 2>/dev/null || true"]
+  # RKE2 node prerequisites the minimal cloud images lack (#219): the
+  # iptables binary (Canal's portmap plugin execs it; without it every
+  # pod sandbox fails after IP allocation and leaks the address), and on
+  # EL10 the netfilter match modules, which ship in kernel-modules-extra.
+  - [sh, -c, "if command -v dnf >/dev/null; then dnf -y -q install iptables-nft kernel-modules-extra-\$(uname -r); elif command -v zypper >/dev/null; then zypper -n -q in iptables; fi"]
+  - [sh, -c, "modprobe -a overlay br_netfilter xt_conntrack xt_comment || true"]
+EOF
+  rm -f "$LAB/$n/seed.iso"
+  genisoimage -quiet -output "$LAB/$n/seed.iso" -volid cidata -joliet -rock "$d/user-data" "$d/meta-data" "$d/network-config"
+}
+
+start_vm() {
+  local line n img cpus mem ip port extra i=0 idx
+  line=$(vm_line "$1") || { echo "unknown vm $1"; return 1; }
+  n=$(field "$line" 1); img=$(field "$line" 2); cpus=$(field "$line" 3); mem=$(field "$line" 4)
+  ip=$(field "$line" 5); port=$(field "$line" 6); extra=$(field "$line" 7)
+  idx=${ip##*.}
+  mkdir -p "$LAB/$n"
+  if [ -f "$LAB/$n/pid" ] && kill -0 "$(cat "$LAB/$n/pid")" 2>/dev/null; then echo "$n: already running"; return; fi
+  if [ ! -f "$LAB/$n/disk.qcow2" ]; then
+    qemu-img create -q -f qcow2 -F qcow2 -b "$IMAGES/$img.qcow2" "$LAB/$n/disk.qcow2" 60G
+    seed "$n" "$ip" "$idx"
+  fi
+  local fwd="hostfwd=tcp:127.0.0.1:$port-:22"; [ -n "$extra" ] && fwd="$fwd,$extra"
+  vm-run --name "rancher-$n" qemu-system-x86_64 -name "pqc-rancher-$n" -machine q35,accel=kvm -cpu host -smp "$cpus" -m "$mem" \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \
+    -drive if=pflash,format=raw,file="$LAB/$n/vars.fd" \
+    -drive file="$LAB/$n/disk.qcow2",if=virtio \
+    -drive file="$LAB/$n/seed.iso",media=cdrom,readonly=on \
+    -netdev "user,id=wan,$fwd" -device virtio-net-pci,netdev=wan,mac="$(mac 1 "$idx")" \
+    -netdev "socket,id=lab,mcast=$MCAST,localaddr=127.0.0.1" -device virtio-net-pci,netdev=lab,mac="$(mac 2 "$idx")" \
+    -display none -serial file:"$LAB/$n/console.log" -daemonize -pidfile "$LAB/$n/pid"
+  echo "$n: started (ssh -p $port, lab ip $ip)"
+}
+
+case "${1:-}" in
+  start)
+    for v in "${VMS[@]}"; do n=$(field "$v" 1)
+      [ -f "$LAB/$n/vars.fd" ] || { mkdir -p "$LAB/$n"; cp /usr/share/edk2/ovmf/OVMF_VARS.fd "$LAB/$n/vars.fd"; }
+      start_vm "$n"; done ;;
+  stop)
+    for v in "${VMS[@]}"; do n=$(field "$v" 1); p=$(field "$v" 6)
+      if [ -f "$LAB/$n/pid" ] && kill -0 "$(cat "$LAB/$n/pid")" 2>/dev/null; then
+        ssh -q -i "$LAB/id_ed25519" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p "$p" lab@127.0.0.1 sudo poweroff >/dev/null 2>&1
+        for _ in $(seq 60); do kill -0 "$(cat "$LAB/$n/pid")" 2>/dev/null || break; sleep 2; done
+        kill "$(cat "$LAB/$n/pid")" 2>/dev/null; echo "$n: stopped"
+      else echo "$n: not running"; fi
+      rm -f "$LAB/$n/pid"; done ;;
+  status)
+    for v in "${VMS[@]}"; do n=$(field "$v" 1)
+      if [ -f "$LAB/$n/pid" ] && kill -0 "$(cat "$LAB/$n/pid")" 2>/dev/null; then echo "$n: running (pid $(cat "$LAB/$n/pid"), ssh -p $(field "$v" 6), $(field "$v" 5))"; else echo "$n: stopped"; fi; done ;;
+  ssh)
+    line=$(vm_line "${2:-}") || { echo "usage: $0 ssh <vm> [cmd]"; exit 2; }; shift 2
+    exec ssh -q -i "$LAB/id_ed25519" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p "$(field "$line" 6)" lab@127.0.0.1 "$@" ;;
+  console)
+    exec tail -f "$LAB/${2:?vm}/console.log" ;;
+  *) sed -n '2,15p' "$0"; exit 2 ;;
+esac
