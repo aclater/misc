@@ -1,5 +1,36 @@
 # misc scripts and what have you
 
+## Quick start
+
+You need a Fedora system and git. This installs the [personal tools](#personal-tools-bin) for your user; nothing
+needs root.
+
+1. Get the repository and preview what the installer will link:
+
+   ```
+   git clone https://github.com/aclater/misc.git
+   cd misc
+   ./install-bin.sh --dry-run
+   ```
+
+2. Link the tools into `~/.local/bin` and the user units into `~/.config/systemd/user`:
+
+   ```
+   ./install-bin.sh
+   ```
+
+3. Try one. This shows the network protections in effect, without changing anything:
+
+   ```
+   roam-guard status
+   ```
+
+| If you want to | Go to |
+|---|---|
+| Set up a fresh Fedora Workstation | [fedora_stuff.sh](#fedora_stuffsh-fedora-post-install) |
+| Lock the laptop down on every network it joins | [roam-guard](#roam-guard) |
+| Import Federal or DoD PKI certificates | [PIV and Federal/DoD PKI](#piv-and-federaldod-pki) |
+
 # Logitech c920 scripts
 These won't work with your webcam if it doesnt support "zoom_absolute"
 
